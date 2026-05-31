@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+server/node_modules/
+
+# Build output
+dist/
+server/dist/
+
+# Environment (never commit secrets!)
+server/.env
+.env
+
+# Logs & OS
+*.log
+.DS_Store
+Thumbs.db
+
+# Vite cache
+.vite/
