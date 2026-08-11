@@ -93,7 +93,8 @@ die richtige Reihenfolge automatisch.
 
 ## Docker
 
-Kompletter Stack (App + MySQL) mit einem Befehl:
+Kompletter Stack (App + MySQL) mit einem Befehl — praktisch für lokale Entwicklung
+oder Server, auf denen Docker läuft:
 
 ```bash
 cp server/.env.example server/.env   # JWT_SECRET setzen, DB_* werden von compose überschrieben
@@ -102,6 +103,68 @@ docker compose up --build
 
 Die App ist danach unter `http://localhost:3001` erreichbar. `schema.sql` wird
 beim ersten Start automatisch in die MySQL-Datenbank eingespielt.
+
+## Deployment auf Windows Server / IIS (ohne Docker)
+
+Für einen Windows-Server, auf dem bereits andere Seiten über IIS laufen und eine
+eigene MySQL-Instanz existiert (z.B. per MySQL Workbench verwaltet) — Node läuft dabei
+als eigenständiger Hintergrundprozess, IIS reicht Anfragen nur per Reverse Proxy durch.
+**Hinweis:** Diese Anleitung ist mangels Windows-/IIS-Testumgebung nicht selbst
+durchgespielt worden — vor dem produktiven Einsatz einmal end-to-end gegenprüfen.
+
+**Voraussetzungen auf dem Server:**
+- Node.js 20+
+- IIS mit den Modulen [URL Rewrite](https://www.iis.net/downloads/microsoft/url-rewrite) und
+  [Application Request Routing (ARR)](https://www.iis.net/downloads/microsoft/application-request-routing)
+  (serverweit installiert — ARR läuft eventuell schon für SimSpedition mit)
+- [NSSM](https://nssm.cc/) (Non-Sucking Service Manager), um den Node-Prozess als
+  Windows-Dienst zu betreiben — jede andere Methode, einen Node-Prozess dauerhaft am
+  Laufen zu halten (PM2, Task Scheduler, …), funktioniert genauso
+
+**1. Datenbank in der bestehenden MySQL-Instanz anlegen** (z.B. in Workbench):
+```sql
+CREATE DATABASE farmtycoon;
+```
+Dann `schema.sql` gegen diese Datenbank ausführen (Workbench: *File → Run SQL Script*).
+
+**2. Repo bauen** (auf dem Server oder lokal bauen und `dist/`, `server/dist/`,
+`server/node_modules/` mit hochladen — `node_modules` sollte aber wegen `bcrypt`s
+nativer Bindings direkt auf dem Zielserver installiert werden):
+```powershell
+npm install
+npm --prefix server install
+npm run build:all
+```
+
+**3. `server\.env` konfigurieren** — `DB_HOST`/`DB_PORT`/`DB_USER`/`DB_PASSWORD` zeigen
+auf die bestehende MySQL-Instanz (z.B. `DB_HOST=localhost`, falls MySQL auf demselben
+Server läuft), `DB_NAME=farmtycoon`, `JWT_SECRET` setzen, `FRONTEND_ORIGIN` auf die
+später genutzte Domain/URL:
+```powershell
+copy server\.env.example server\.env
+notepad server\.env
+```
+
+**4. Node als Windows-Dienst einrichten** (`server\.env` wird per `dotenv` relativ zum
+Arbeitsverzeichnis geladen — deshalb `AppDirectory` auf den `server`-Ordner setzen):
+```powershell
+nssm install FieldFaction "C:\Program Files\nodejs\node.exe" "dist\index.js"
+nssm set FieldFaction AppDirectory "C:\pfad\zu\fieldfaction\server"
+nssm start FieldFaction
+```
+Kurzer Check, bevor IIS eingebunden wird: `curl http://localhost:3001/api/health`
+sollte `{"ok":true}` liefern.
+
+**5. IIS als Reverse Proxy einrichten:**
+- Im IIS-Manager am Server-Knoten unter *Application Request Routing Cache →
+  Server Proxy Settings* einmalig **Enable proxy** aktivieren.
+- Neue Website (eigene Bindung/Hostname, **nicht** die von SimSpedition) anlegen, z.B.
+  `fieldfaction.deine-domain.de`.
+- [`deploy/iis-web.config`](deploy/iis-web.config) in den physischen Pfad dieser
+  Website legen (Port darin anpassen, falls `PORT` in `server/.env` nicht 3001 ist).
+
+Neustart/Update danach: `npm run build:all` erneut ausführen, dann
+`nssm restart FieldFaction`.
 
 ## Projektstruktur
 
