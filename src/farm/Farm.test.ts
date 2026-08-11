@@ -87,3 +87,26 @@ describe('field lifecycle: empty -> fallow -> tilled -> planted -> ready -> harv
     expect(result).toBe(before); // no-op: fieldState is 'fallow', not 'ready'
   });
 });
+
+describe('createInitialState with a chosen starting location', () => {
+  it('defaults to München when called without arguments', () => {
+    const state = createInitialState();
+    expect(state.activeFarmId).toBe('muenchen');
+    expect(state.farmMeta).toEqual([expect.objectContaining({ id: 'muenchen', city: 'München' })]);
+    expect(Object.keys(state.farms)).toEqual(['muenchen']);
+  });
+
+  it('sets up the starter farm at the given location instead', () => {
+    const state = createInitialState({ id: 'hamburg_123', name: 'Hof Elbe', city: 'Hamburg', lat: 53.55, lon: 9.99 });
+
+    expect(state.activeFarmId).toBe('hamburg_123');
+    expect(Object.keys(state.farms)).toEqual(['hamburg_123']);
+    expect(state.farmMeta).toEqual([
+      { id: 'hamburg_123', name: 'Hof Elbe', city: 'Hamburg', unlocked: true, unlockCost: 0, lat: 53.55, lon: 9.99 },
+    ]);
+    // Starter-Ausrüstung/Personal hängen am gewählten Standort, nicht an München.
+    expect(state.employees[0].farmId).toBe('hamburg_123');
+    expect(state.vehicles[0].farmId).toBe('hamburg_123');
+    expect(state.implements.every(i => i.farmId === 'hamburg_123')).toBe(true);
+  });
+});

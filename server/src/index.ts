@@ -3,7 +3,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import dotenv from 'dotenv';
 import path from 'path';
-import { testConnection, initTables } from './db';
+import { testConnection, initTables, migrateUsersTable } from './db';
 import authRoutes from './routes/auth';
 import gameRoutes from './routes/game';
 import marketRoutes from './routes/market';
@@ -49,6 +49,12 @@ async function main() {
   } catch (e: any) {
     // Tabellen wurden manuell angelegt oder User hat keine CREATE-Rechte — OK
     console.warn('[DB] initTables übersprungen:', e.sqlMessage ?? e.message);
+  }
+  try {
+    await migrateUsersTable();
+    console.log('[DB] users-Tabelle auf E-Mail-Verifizierung migriert');
+  } catch (e: any) {
+    console.warn('[DB] migrateUsersTable übersprungen:', e.sqlMessage ?? e.message);
   }
 
   // Markt-Matching alle 60 Sekunden

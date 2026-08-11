@@ -13,7 +13,7 @@ import { mockAuth, mockGameServer, freshGameState, mockMarket, loginAsTestUser }
 test.describe('Field interactions', () => {
   test.beforeEach(async ({ page }) => {
     await mockAuth(page);
-    await mockGameServer(page, freshGameState(), true);
+    await mockGameServer(page, freshGameState());
     await mockMarket(page);
     await loginAsTestUser(page);
   });

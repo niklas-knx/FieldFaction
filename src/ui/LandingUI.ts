@@ -1,15 +1,20 @@
-import { apiLogin, apiRegister } from '../api';
+import { apiLogin, apiRegister, apiResendVerification } from '../api';
 
 type OnSuccess = (token: string, username: string) => void;
 
 export class LandingUI {
   private container: HTMLElement;
   private onSuccess: OnSuccess;
-  private mode: 'login' | 'register' = 'login';
+  private mode: 'login' | 'register' | 'check-email' = 'login';
+  // Username/E-Mail, für die zuletzt eine Verifizierung nötig war — Ziel des
+  // "Erneut senden"-Buttons (Login akzeptiert beides, siehe apiResendVerification).
+  private pendingVerificationLogin = '';
+  private initialError?: string;
 
-  constructor(container: HTMLElement, onSuccess: OnSuccess) {
+  constructor(container: HTMLElement, onSuccess: OnSuccess, initialError?: string) {
     this.container = container;
     this.onSuccess = onSuccess;
+    this.initialError = initialError;
   }
 
   render(): void {
@@ -128,12 +133,15 @@ export class LandingUI {
               <p>Kostenlos — kein Download nötig.</p>
             </div>
             <div class="lp-auth-card">
+              ${this.mode === 'check-email' ? '' : `
               <div class="lp-auth-tabs">
                 <button class="lp-auth-tab ${this.mode === 'login' ? 'lp-auth-tab-active' : ''}" id="tab-login">Anmelden</button>
                 <button class="lp-auth-tab ${this.mode === 'register' ? 'lp-auth-tab-active' : ''}" id="tab-register">Registrieren</button>
-              </div>
-              ${this.mode === 'login' ? this.loginForm() : this.registerForm()}
-              <div id="auth-error" class="auth-error hidden"></div>
+              </div>`}
+              ${this.mode === 'login' ? this.loginForm()
+                : this.mode === 'register' ? this.registerForm()
+                : this.checkEmailScreen()}
+              <div id="auth-error" class="auth-error ${this.initialError ? '' : 'hidden'}">${this.initialError ?? ''}</div>
             </div>
           </div>
         </section>
@@ -168,6 +176,16 @@ export class LandingUI {
       </form>`;
   }
 
+  private checkEmailScreen(): string {
+    return `
+      <div class="auth-check-email">
+        <p>Wir haben dir einen Bestätigungslink an <strong>${this.pendingVerificationLogin}</strong> geschickt.
+        Klicke ihn an, um dein Konto zu aktivieren.</p>
+        <button class="btn btn-secondary lp-submit" id="resend-verification-btn" type="button">Erneut senden</button>
+        <a href="#" id="back-to-login-link" class="lp-back-link">Zurück zum Login</a>
+      </div>`;
+  }
+
   private bindEvents(): void {
     this.container.querySelector('#tab-login')?.addEventListener('click', () => {
       this.mode = 'login'; this.render();
@@ -180,6 +198,18 @@ export class LandingUI {
     this.container.querySelector('#auth-form')?.addEventListener('submit', e => {
       e.preventDefault();
       this.mode === 'login' ? this.handleLogin() : this.handleRegister();
+    });
+    this.container.querySelector('#resend-verification-btn')?.addEventListener('click', async () => {
+      const btn = this.container.querySelector<HTMLButtonElement>('#resend-verification-btn')!;
+      btn.disabled = true;
+      btn.textContent = 'Wird gesendet…';
+      await apiResendVerification(this.pendingVerificationLogin).catch(() => {});
+      btn.textContent = 'Erneut gesendet ✓';
+    });
+    this.container.querySelector('#back-to-login-link')?.addEventListener('click', e => {
+      e.preventDefault();
+      this.initialError = undefined;
+      this.mode = 'login'; this.render();
     });
     this.container.querySelectorAll('a[href="#auth"]').forEach(a => {
       a.addEventListener('click', e => {
@@ -212,6 +242,12 @@ export class LandingUI {
       const { token, username } = await apiLogin(login, password);
       this.onSuccess(token, username);
     } catch (err: any) {
+      if (err.code === 'email_not_verified') {
+        this.pendingVerificationLogin = login;
+        this.mode = 'check-email';
+        this.render();
+        return;
+      }
       this.showError(err.message);
       this.setLoading(false);
     }
@@ -223,8 +259,10 @@ export class LandingUI {
     const password = this.container.querySelector<HTMLInputElement>('#f-password')!.value;
     this.setLoading(true);
     try {
-      const { token, username: uname } = await apiRegister(username, email, password);
-      this.onSuccess(token, uname);
+      const { email: confirmedEmail } = await apiRegister(username, email, password);
+      this.pendingVerificationLogin = confirmedEmail;
+      this.mode = 'check-email';
+      this.render();
     } catch (err: any) {
       this.showError(err.message);
       this.setLoading(false);

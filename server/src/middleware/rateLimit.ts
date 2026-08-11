@@ -26,3 +26,13 @@ export const marketWriteLimiter = rateLimit({
   legacyHeaders: false,
   message: { error: 'Zu viele Markt-Anfragen — bitte kurz warten' },
 });
+
+// Verifizierungs-Mail erneut anfordern: verhindert, dass der Endpunkt zum Mail-Spam
+// gegen fremde Adressen missbraucht wird.
+export const resendVerificationLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 3,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Zu viele Anfragen — bitte in ein paar Minuten erneut versuchen' },
+});

@@ -91,3 +91,22 @@ export async function initTables(): Promise<void> {
     )
   `);
 }
+
+// Fügt die Spalten für die E-Mail-Verifizierung zu einer bereits vorhandenen
+// `users`-Tabelle hinzu (schema.sql enthält sie für Neuinstallationen bereits).
+// MySQL kennt kein "ADD COLUMN IF NOT EXISTS" — ER_DUP_FIELDNAME (1060) bedeutet
+// hier "Spalte existiert schon", kein echter Fehler.
+export async function migrateUsersTable(): Promise<void> {
+  const columns: [string, string][] = [
+    ['email_verified', 'TINYINT(1) NOT NULL DEFAULT 0'],
+    ['verification_token', 'VARCHAR(64) NULL'],
+    ['verification_token_expires_at', 'BIGINT NULL'],
+  ];
+  for (const [name, def] of columns) {
+    try {
+      await pool.execute(`ALTER TABLE users ADD COLUMN ${name} ${def}`);
+    } catch (e: any) {
+      if (e.code !== 'ER_DUP_FIELDNAME') throw e;
+    }
+  }
+}

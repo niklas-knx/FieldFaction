@@ -42,27 +42,31 @@ function installSavedState(state: any, lastSavedAt: number) {
 }
 
 function installNoSavedState() {
-  execute.mockImplementation(async (sql: string) => {
+  const insertedStates: any[] = [];
+  execute.mockImplementation(async (sql: string, params: any[] = []) => {
     if (/SELECT state_json/.test(sql)) return [[]];
-    if (/INSERT INTO game_states/.test(sql)) return [{}];
+    if (/INSERT INTO game_states/.test(sql)) {
+      insertedStates.push(JSON.parse(params[2]));
+      return [{}];
+    }
     return [[]];
   });
+  return insertedStates;
 }
 
 beforeEach(() => execute.mockReset());
 
 describe('GET /api/game/state', () => {
-  it('creates and persists a fresh game for a user with no saved state', async () => {
+  it('reports newGame without a state and without persisting anything for a fresh account', async () => {
     installNoSavedState();
 
     const res = await request(buildApp()).get('/api/game/state');
     expect(res.status).toBe(200);
     expect(res.body.newGame).toBe(true);
-    expect(res.body.state.money).toBe(5000);
-    expect(res.body.state.activeFarmId).toBe('muenchen');
+    expect(res.body.state).toBeUndefined();
 
     const insertCall = execute.mock.calls.find((c: any[]) => /INSERT INTO game_states/.test(c[0]));
-    expect(insertCall).toBeTruthy();
+    expect(insertCall).toBeFalsy();
   });
 
   it('advances an existing state by the real elapsed time since the last save', async () => {
@@ -130,6 +134,71 @@ describe('POST /api/game/action', () => {
       .send({ type: 'tillPlot', args: 'muenchen' });
 
     expect(res.status).toBe(400);
+  });
+
+  it('rejects with 409 when the account has not chosen a starting location yet', async () => {
+    installNoSavedState();
+
+    const res = await request(buildApp())
+      .post('/api/game/action')
+      .send({ type: 'tillPlot', args: ['muenchen', 0] });
+
+    expect(res.status).toBe(409);
+  });
+});
+
+describe('POST /api/game/start', () => {
+  it('creates a game state at the chosen location for a fresh account', async () => {
+    const insertedStates = installNoSavedState();
+
+    const res = await request(buildApp())
+      .post('/api/game/start')
+      .send({ city: 'Hamburg', farmName: 'Hof Elbe', lat: 53.55, lon: 9.99 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.state.activeFarmId).toMatch(/^hamburg_/);
+    expect(res.body.state.farmMeta).toHaveLength(1);
+    expect(res.body.state.farmMeta[0]).toMatchObject({
+      name: 'Hof Elbe', city: 'Hamburg', lat: 53.55, lon: 9.99, unlocked: true, unlockCost: 0,
+    });
+    expect(Object.keys(res.body.state.farms)).toEqual([res.body.state.activeFarmId]);
+    expect(insertedStates).toHaveLength(1);
+  });
+
+  it('defaults the farm name when none is given', async () => {
+    installNoSavedState();
+
+    const res = await request(buildApp())
+      .post('/api/game/start')
+      .send({ city: 'Köln', lat: 50.94, lon: 6.96 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.state.farmMeta[0].name).toBe('Gut Köln');
+  });
+
+  it('rejects a missing city or invalid coordinates', async () => {
+    installNoSavedState();
+
+    const noCity = await request(buildApp()).post('/api/game/start').send({ lat: 1, lon: 1 });
+    expect(noCity.status).toBe(400);
+
+    const badCoords = await request(buildApp())
+      .post('/api/game/start')
+      .send({ city: 'Berlin', lat: 999, lon: 9 });
+    expect(badCoords.status).toBe(400);
+  });
+
+  it('is idempotent: ignores the choice and returns the existing state if one already exists', async () => {
+    const saved = createInitialState();
+    const insertedStates = installSavedState(saved, Date.now());
+
+    const res = await request(buildApp())
+      .post('/api/game/start')
+      .send({ city: 'Hamburg', farmName: 'Hof Elbe', lat: 53.55, lon: 9.99 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.state.activeFarmId).toBe('muenchen'); // unverändert, nicht Hamburg
+    expect(insertedStates).toHaveLength(1);
   });
 });
 

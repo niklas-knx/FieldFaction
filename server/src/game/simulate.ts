@@ -2,9 +2,9 @@
 // simulation the browser used to run on its own — see Issue #7 (server-autoritative
 // Anti-Cheat). No duplication of Farm.ts's rules on purpose: divergence between a
 // server copy and the client copy would itself become a new class of bugs/exploits.
-export { tickGame, createInitialState, emptyTickEvents, applyMarketCredits, TICKS_PER_DAY } from '../../../src/farm/Farm';
+export { tickGame, createInitialState, emptyTickEvents, applyMarketCredits, slugifyCityId, TICKS_PER_DAY } from '../../../src/farm/Farm';
 export type { GameState, MarketCredit } from '../../../src/types';
-export type { TickEvents } from '../../../src/farm/Farm';
+export type { TickEvents, StartLocationInput } from '../../../src/farm/Farm';
 
 import { tickGame as tick, emptyTickEvents as emptyEvents } from '../../../src/farm/Farm';
 import type { TickEvents } from '../../../src/farm/Farm';

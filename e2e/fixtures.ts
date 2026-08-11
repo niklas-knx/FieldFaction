@@ -41,11 +41,19 @@ export function freshGameState(storageOverrides: Record<string, number> = {}): G
   };
 }
 
+// Deterministisch aus dem Usernamen abgeleiteter "Token" — genug, um den kompletten
+// Registrieren-→-Verifizieren-Flow durchzuspielen, ohne echten Mail-Versand.
+function fakeVerificationToken(username: string): string {
+  return `verify-token-for-${username}`;
+}
+
 export async function mockAuth(page: Page): Promise<void> {
   await page.route('**/api/auth/login', async route => {
     const body = route.request().postDataJSON();
     if (body?.login === 'testuser' && body?.password === 'correct-password') {
       await route.fulfill({ json: { token: 'fake-jwt-token', username: 'testuser' } });
+    } else if (body?.login === 'unverified' && body?.password === 'correct-password') {
+      await route.fulfill({ status: 403, json: { error: 'E-Mail noch nicht bestätigt', code: 'email_not_verified' } });
     } else {
       await route.fulfill({ status: 401, json: { error: 'Benutzername oder Passwort falsch' } });
     }
@@ -56,26 +64,61 @@ export async function mockAuth(page: Page): Promise<void> {
     if (body?.username === 'taken') {
       await route.fulfill({ status: 409, json: { error: 'Benutzername bereits vergeben' } });
     } else {
-      await route.fulfill({ status: 201, json: { token: 'fake-jwt-token', username: body?.username } });
+      await route.fulfill({ status: 201, json: { requiresVerification: true, email: body?.email } });
     }
+  });
+
+  await page.route('**/api/auth/verify', async route => {
+    const { token } = route.request().postDataJSON() ?? {};
+    if (typeof token === 'string' && token.startsWith('verify-token-for-')) {
+      const username = token.slice('verify-token-for-'.length);
+      await route.fulfill({ json: { token: 'fake-jwt-token', username } });
+    } else {
+      await route.fulfill({ status: 400, json: { error: 'Ungültiger Bestätigungslink' } });
+    }
+  });
+
+  await page.route('**/api/auth/resend-verification', async route => {
+    await route.fulfill({ json: { ok: true } });
   });
 }
 
-// Stateful fake backend for GET /game/state + POST /game/action: keeps a mutable
-// GameState in closure and applies the exact same reducer functions the real server
-// uses (see server/src/game/actions.ts), so tests exercise the real game logic instead
-// of a hand-rolled approximation of it. `isNewGame` controls the first GET's flag only.
-export async function mockGameServer(page: Page, initialState: GameState, isNewGame = false): Promise<void> {
-  let state = initialState;
-  let firstLoad = true;
+// Simuliert den Klick auf den per Mail verschickten Bestätigungslink.
+export function verificationLinkFor(username: string): string {
+  return `/?verifyToken=${fakeVerificationToken(username)}`;
+}
+
+// Nominatim-Stadtsuche (StartLocationUI, "Standort eröffnen") — echter externer Aufruf,
+// wird für Tests auf ein festes Ergebnis gemockt.
+export async function mockCitySearch(page: Page, city: string, lat: number, lon: number): Promise<void> {
+  await page.route('https://nominatim.openstreetmap.org/**', async route => {
+    await route.fulfill({
+      json: [{
+        lat: String(lat), lon: String(lon),
+        address: { city, country_code: 'de', state: 'Test-Bundesland' },
+      }],
+    });
+  });
+}
+
+// Stateful fake backend for GET /game/state, POST /game/start und POST /game/action:
+// hält einen veränderlichen GameState im Closure und wendet dieselben Reducer-
+// Funktionen an wie der echte Server (siehe server/src/game/actions.ts), damit Tests
+// echte Spiellogik statt einer Handnachbildung durchlaufen. Ohne `initialState` (bzw.
+// mit `null`) verhält es sich wie ein frisch verifizierter Account ohne Spielstand —
+// erst POST /game/start legt einen an (genau wie beim echten Server).
+export async function mockGameServer(page: Page, initialState: GameState | null = null): Promise<void> {
+  let state: GameState | null = initialState;
 
   await page.route('**/api/game/state', async route => {
     if (route.request().method() !== 'GET') return route.continue();
-    const newGame = firstLoad && isNewGame;
-    firstLoad = false;
+    if (!state) {
+      await route.fulfill({ json: { newGame: true } });
+      return;
+    }
     await route.fulfill({
       json: {
-        newGame,
+        newGame: false,
         state,
         events: emptyTickEvents(),
         offlineSeconds: 0,
@@ -84,8 +127,27 @@ export async function mockGameServer(page: Page, initialState: GameState, isNewG
     });
   });
 
+  await page.route('**/api/game/start', async route => {
+    if (route.request().method() !== 'POST') return route.continue();
+    if (!state) {
+      const { city, farmName, lat, lon } = route.request().postDataJSON() ?? {};
+      const id = `${String(city).toLowerCase()}_test`;
+      state = createInitialState({ id, name: farmName || `Gut ${city}`, city, lat, lon });
+    }
+    await route.fulfill({
+      json: {
+        newGame: false, state,
+        events: emptyTickEvents(), offlineSeconds: 0, previousMarketPrices: state.marketPrices,
+      },
+    });
+  });
+
   await page.route('**/api/game/action', async route => {
     if (route.request().method() !== 'POST') return route.continue();
+    if (!state) {
+      await route.fulfill({ status: 409, json: { error: 'Noch kein Spielstand' } });
+      return;
+    }
     const { type, args } = route.request().postDataJSON() ?? {};
     const action = GAME_ACTIONS[type];
     if (!action) {

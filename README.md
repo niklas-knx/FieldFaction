@@ -50,7 +50,11 @@ cp server/.env.example server/.env
 | `DB_NAME`         | Datenbankname (Standard: `farmtycoon`)                  |
 | `JWT_SECRET`      | Zufälliger String, min. 64 Zeichen — signiert Login-Tokens |
 | `JWT_EXPIRES_IN`  | Gültigkeitsdauer der Tokens (Standard: `7d`)             |
-| `FRONTEND_ORIGIN` | Erlaubte CORS-Origin für den Dev-Server (Standard: `http://localhost:5173`) |
+| `FRONTEND_ORIGIN` | Erlaubte CORS-Origin, gleichzeitig Basis für Verifizierungs-Links (Standard: `http://localhost:5173`) |
+| `SMTP_HOST`       | SMTP-Server für Verifizierungs-Mails — **leer lassen** für lokale Entwicklung: Bestätigungslinks werden dann nur in die Server-Konsole geloggt |
+| `SMTP_PORT`       | SMTP-Port (Standard: 587)                                |
+| `SMTP_USER`/`SMTP_PASS` | SMTP-Zugangsdaten (falls der Provider Auth verlangt)|
+| `SMTP_FROM`       | Absenderadresse der Verifizierungs-Mails                 |
 
 ## Entwicklung
 

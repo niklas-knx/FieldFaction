@@ -2,14 +2,21 @@ import { Router, Request, Response } from 'express';
 import { pool } from '../db';
 import { requireAuth } from '../middleware/auth';
 import { validateGameStateShape } from '../game/validateState';
-import { advanceState, createInitialState, applyMarketCredits } from '../game/simulate';
-import type { MarketCredit } from '../game/simulate';
+import {
+  advanceState, createInitialState, applyMarketCredits, emptyTickEvents, slugifyCityId,
+} from '../game/simulate';
+import type { MarketCredit, StartLocationInput } from '../game/simulate';
 import { GAME_ACTIONS, isGameActionType } from '../game/actions';
 import { bus } from '../../../src/core/EventBus';
 
 const router = Router();
 const SAVE_VERSION = 11; // muss mit src/main.ts übereinstimmen
 const MAX_CATCHUP_TICKS = 7 * 24 * 60 * 60; // max 7 Tage Nachholzeit pro Sync
+
+// Signalisiert "für diesen Account existiert noch kein Spielstand" — kein Fehler,
+// sondern der erwartete Zustand direkt nach der Registrierung, bevor der Client per
+// POST /start einen Startort gewählt hat.
+class NoGameYetError extends Error {}
 
 async function loadStateRow(userId: number): Promise<{ state_json: string; last_saved_at: number } | null> {
   const [rows]: any = await pool.execute(
@@ -63,17 +70,17 @@ async function applyPendingCredits(userId: number, state: any): Promise<any> {
   return applied;
 }
 
-// Lädt den gespeicherten Stand (legt bei Bedarf einen neuen an), bucht offene Markt-
-// Credits ein und lässt das Ergebnis per advanceState() bis zum aktuellen Zeitpunkt
-// weiterlaufen — seit Issue #7 die einzige Stelle, an der überhaupt Ticks entstehen.
-// Persistiert hier bewusst NICHT: Aufrufer (GET /state, POST /action) entscheiden
-// selbst, mit welchem Endergebnis gespeichert wird.
+// Lädt den gespeicherten Stand, bucht offene Markt-Credits ein und lässt das Ergebnis
+// per advanceState() bis zum aktuellen Zeitpunkt weiterlaufen — die einzige Stelle, an
+// der überhaupt Ticks entstehen. Wirft NoGameYetError, wenn der Account noch keinen
+// Startort gewählt hat (siehe POST /start). Persistiert hier bewusst NICHT: Aufrufer
+// entscheiden selbst, mit welchem Endergebnis gespeichert wird.
 async function loadAndAdvance(userId: number, now: number) {
   const row = await loadStateRow(userId);
+  if (!row) throw new NoGameYetError();
 
-  const isNew = !row;
-  let state: any = row ? JSON.parse(row.state_json) : createInitialState();
-  const lastSavedAt = row ? Number(row.last_saved_at) : now;
+  let state: any = JSON.parse(row.state_json);
+  const lastSavedAt = Number(row.last_saved_at);
 
   state = await applyPendingCredits(userId, state);
 
@@ -90,7 +97,6 @@ async function loadAndAdvance(userId: number, now: number) {
   return {
     state: advanced,
     events,
-    isNew,
     offlineSeconds: Math.round(elapsedSeconds),
     // Preise vor dem Nachholen — nur für die "Willkommen zurück"-Anzeige (größte
     // Kursbewegungen während der Abwesenheit), die der Client mangels eigener
@@ -102,21 +108,66 @@ async function loadAndAdvance(userId: number, now: number) {
 // GET /api/game/state
 // Bringt den gespeicherten Stand auf "jetzt" (Feldwachstum, Tierproduktion, Lieferungen,
 // Löhne, …) und liefert ihn zusammen mit den dabei aufgetretenen Ereignissen zurück.
+// Für frisch registrierte Accounts (noch kein Startort gewählt) kommt `newGame: true`
+// ohne `state` zurück — der Client muss zuerst POST /start aufrufen.
 router.get('/state', requireAuth, async (req: Request, res: Response) => {
   const userId = req.user!.userId;
   try {
     const now = Date.now();
-    const { state, events, isNew, offlineSeconds, previousMarketPrices } = await loadAndAdvance(userId, now);
+    const { state, events, offlineSeconds, previousMarketPrices } = await loadAndAdvance(userId, now);
+    await persist(userId, state, now);
+    return res.json({ newGame: false, state, events, offlineSeconds, previousMarketPrices });
+  } catch (err) {
+    if (err instanceof NoGameYetError) {
+      return res.json({ newGame: true });
+    }
+    console.error('[game/state GET]', err);
+    return res.status(500).json({ error: 'Serverfehler' });
+  }
+});
+
+// POST /api/game/start
+// Einmaliger Schritt zwischen Registrierung und erstem Spiel: legt den Spielstand mit
+// dem vom Spieler gewählten Startort an. Idempotent — existiert bereits ein Stand,
+// wird die Auswahl ignoriert und einfach der (fortgeschriebene) bestehende Stand
+// zurückgegeben, statt den Fortschritt zu überschreiben.
+router.post('/start', requireAuth, async (req: Request, res: Response) => {
+  const userId = req.user!.userId;
+  try {
+    const now = Date.now();
+    const existingRow = await loadStateRow(userId);
+
+    if (existingRow) {
+      const { state, events, offlineSeconds, previousMarketPrices } = await loadAndAdvance(userId, now);
+      await persist(userId, state, now);
+      return res.json({ newGame: false, state, events, offlineSeconds, previousMarketPrices });
+    }
+
+    const { city, farmName, lat, lon } = req.body ?? {};
+    if (typeof city !== 'string' || !city.trim()) {
+      return res.status(400).json({ error: 'Stadt erforderlich' });
+    }
+    if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) {
+      return res.status(400).json({ error: 'Ungültige Koordinaten' });
+    }
+    const trimmedCity = city.trim();
+    const name = typeof farmName === 'string' && farmName.trim() ? farmName.trim() : `Gut ${trimmedCity}`;
+    const start: StartLocationInput = { id: slugifyCityId(trimmedCity), name, city: trimmedCity, lat, lon };
+
+    const state = createInitialState(start);
+    const shape = validateGameStateShape(state);
+    if (!shape.valid) {
+      console.error(`[game/start] Ungültiger initialer Zustand: ${shape.reason}`);
+      return res.status(500).json({ error: 'Serverfehler' });
+    }
+
     await persist(userId, state, now);
     return res.json({
-      newGame: isNew,
-      state,
-      events,
-      offlineSeconds: isNew ? 0 : offlineSeconds,
-      previousMarketPrices,
+      newGame: false, state, events: emptyTickEvents(), offlineSeconds: 0,
+      previousMarketPrices: state.marketPrices,
     });
   } catch (err) {
-    console.error('[game/state GET]', err);
+    console.error('[game/start POST]', err);
     return res.status(500).json({ error: 'Serverfehler' });
   }
 });
@@ -167,6 +218,9 @@ router.post('/action', requireAuth, async (req: Request, res: Response) => {
     await persist(userId, result, now);
     return res.json({ state: result, events, notifications });
   } catch (err) {
+    if (err instanceof NoGameYetError) {
+      return res.status(409).json({ error: 'Noch kein Spielstand — zuerst einen Startort wählen' });
+    }
     console.error('[game/action POST]', err);
     return res.status(500).json({ error: 'Serverfehler' });
   }

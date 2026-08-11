@@ -1,4 +1,4 @@
-import type { GameState, FarmLocation, Plot, StallSlot, Season, StallSize, ProcessingSlot, OwnedVehicle, OwnedImplement, Delivery, Employee, EmployeeRole, MarketCredit } from '../types';
+import type { GameState, FarmLocation, FarmMeta, Plot, StallSlot, Season, StallSize, ProcessingSlot, OwnedVehicle, OwnedImplement, Delivery, Employee, EmployeeRole, MarketCredit } from '../types';
 import { VEHICLES } from '../data/vehicles';
 import { IMPLEMENTS } from '../data/implements';
 import { CROPS } from '../data/crops';
@@ -205,14 +205,28 @@ function makeFarm(): FarmLocation {
   return { plots: Array.from({ length: MAX_PLOTS }, (_, i) => makePlot(i)), storage: {} };
 }
 
-export function createInitialState(): GameState {
-  const farms: Record<string, FarmLocation> = {};
-  FARM_META.forEach(m => { if (m.unlocked) farms[m.id] = makeFarm(); });
+// Frei wählbarer Startort (siehe server/src/routes/game.ts POST /start): ohne Angabe
+// fällt der Startort auf den vordefinierten Standort in FARM_META zurück (München),
+// damit bestehende Aufrufe von createInitialState() unverändert funktionieren.
+export interface StartLocationInput {
+  id: string;
+  name: string;
+  city: string;
+  lat: number;
+  lon: number;
+}
+
+export function createInitialState(start?: StartLocationInput): GameState {
+  const startMeta: FarmMeta = start
+    ? { id: start.id, name: start.name, city: start.city, unlocked: true, unlockCost: 0, lat: start.lat, lon: start.lon }
+    : FARM_META[0];
+  const farmId = startMeta.id;
+
   return {
     money: 5_000, tick: 0, day: 1, season: 'spring', year: 1,
-    farms, farmMeta: FARM_META, activeFarmId: 'muenchen',
+    farms: { [farmId]: makeFarm() }, farmMeta: [startMeta], activeFarmId: farmId,
     employees: [
-      { uid: 1, role: 'farmer', farmId: 'muenchen', wage: EMPLOYEE_ROLES.farmer.wagePerDay, inUseUntilTick: 0 },
+      { uid: 1, role: 'farmer', farmId, wage: EMPLOYEE_ROLES.farmer.wagePerDay, inUseUntilTick: 0 },
     ],
     selectedCrop: 'wheat',
     stats: { totalHarvested: 0, totalEarned: 0 },
@@ -224,11 +238,11 @@ export function createInitialState(): GameState {
     nextDeliveryId: 1,
     // Starter equipment — the old family farm machinery
     vehicles: [
-      { uid: 1, defId: 'traktor', farmId: 'muenchen', inUseUntilTick: 0 },
+      { uid: 1, defId: 'traktor', farmId, inUseUntilTick: 0 },
     ],
     implements: [
-      { uid: 2, defId: 'pflug',       farmId: 'muenchen', inUseUntilTick: 0, pairedVehicleUid: null },
-      { uid: 3, defId: 'saemaschine', farmId: 'muenchen', inUseUntilTick: 0, pairedVehicleUid: null },
+      { uid: 2, defId: 'pflug',       farmId, inUseUntilTick: 0, pairedVehicleUid: null },
+      { uid: 3, defId: 'saemaschine', farmId, inUseUntilTick: 0, pairedVehicleUid: null },
     ],
     nextVehicleUid: 4,
     nextEmployeeUid: 2,
@@ -408,9 +422,16 @@ export function unlockFarm(state: GameState, farmId: string): GameState {
   };
 }
 
+// Erzeugt eine eindeutige, URL-/Key-sichere ID aus einem Stadtnamen — genutzt sowohl
+// beim Eröffnen weiterer Standorte (unten) als auch beim frei wählbaren Startort
+// (server/src/routes/game.ts POST /start).
+export function slugifyCityId(city: string): string {
+  return city.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]/g, '_') + '_' + Date.now();
+}
+
 export function openNewFarm(state: GameState, city: string, farmName: string, lat: number, lon: number, cost: number): GameState {
   if (state.money < cost) { bus.emit('notification', '💸 Nicht genug Geld!'); return state; }
-  const id = city.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]/g, '_') + '_' + Date.now();
+  const id = slugifyCityId(city);
   const newMeta = { id, name: farmName, city, unlocked: true, unlockCost: cost, lat, lon };
   bus.emit('notification', `🎉 ${farmName} in ${city} eröffnet!`);
   return {

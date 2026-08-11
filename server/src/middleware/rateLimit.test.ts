@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import express from 'express';
 import request from 'supertest';
-import { loginLimiter, registerLimiter, marketWriteLimiter } from './rateLimit';
+import { loginLimiter, registerLimiter, marketWriteLimiter, resendVerificationLimiter } from './rateLimit';
 
 function appWith(limiter: express.RequestHandler) {
   const app = express();
@@ -54,5 +54,17 @@ describe('marketWriteLimiter', () => {
     const blocked = await request(app).post('/test');
     expect(blocked.status).toBe(429);
     expect(blocked.body.error).toMatch(/Zu viele Markt-Anfragen/);
+  });
+});
+
+describe('resendVerificationLimiter', () => {
+  it('allows up to 3 requests per window, then blocks with a German error message', async () => {
+    const app = appWith(resendVerificationLimiter);
+    const allowed = await fireRequests(app, 3);
+    for (const res of allowed) expect(res.status).toBe(200);
+
+    const blocked = await request(app).post('/test');
+    expect(blocked.status).toBe(429);
+    expect(blocked.body.error).toMatch(/Zu viele Anfragen/);
   });
 });

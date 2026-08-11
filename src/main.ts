@@ -1,12 +1,13 @@
 import { FarmUI } from './ui/FarmUI';
 import type { WelcomeBackSummary } from './ui/FarmUI';
 import { LandingUI } from './ui/LandingUI';
+import { StartLocationUI } from './ui/StartLocationUI';
 import type { GameState } from './types';
 import type { TickEvents } from './farm/Farm';
 import { PRODUCTS, formatAmount } from './data/products';
 import { EMPLOYEE_ROLES } from './data/employees';
 import { bus } from './core/EventBus';
-import { apiLoadState, isLoggedIn, logout } from './api';
+import { apiLoadState, apiStartGame, apiVerifyEmail, isLoggedIn, logout, type LoadResult } from './api';
 import './style.css';
 import 'leaflet/dist/leaflet.css';
 
@@ -21,6 +22,8 @@ const container = document.getElementById('app')!;
 
 let state: GameState;
 let ui: FarmUI;
+
+type LoadedResult = Exclude<LoadResult, { isNewGame: true }>;
 
 // ── Update-Funktion (von FarmUI nach jeder serverseitig bestätigten Aktion aufgerufen) ──
 const update = (newState: GameState) => {
@@ -71,15 +74,13 @@ function notifyLiveTickEvents(events: TickEvents): void {
   });
 }
 
-// ── Spielstart nach erfolgreichem Login ───────────────────────────────────────
-async function startGame(): Promise<void> {
-  container.innerHTML = '<div class="loading-screen">Spielstand wird geladen…</div>';
-
-  const result = await apiLoadState();
+// ── Spiel mit einem bereits geladenen Stand betreten (normaler Login ODER direkt
+// nach Wahl des Startorts) ─────────────────────────────────────────────────────
+function enterGame(result: LoadedResult): void {
   state = result.state;
 
   let welcomeBack: WelcomeBackSummary | null = null;
-  if (!result.isNewGame && result.offlineSeconds > 0) {
+  if (result.offlineSeconds > 0) {
     welcomeBack = buildWelcomeBackSummary(
       result.offlineSeconds, result.previousMarketPrices, state.marketPrices, result.events,
     );
@@ -100,6 +101,7 @@ async function startGame(): Promise<void> {
   setInterval(async () => {
     try {
       const r = await apiLoadState();
+      if (r.isNewGame) return; // sollte nach dem ersten Start nie mehr vorkommen
       state = r.state;
       notifyLiveTickEvents(r.events);
       ui.render(state);
@@ -109,24 +111,75 @@ async function startGame(): Promise<void> {
   }, SYNC_INTERVAL_MS);
 }
 
+// Frisch verifizierter Account ohne Spielstand: Startort wählen lassen, bevor es losgeht.
+function showStartLocationPicker(): void {
+  const picker = new StartLocationUI(container, async (city, farmName, lat, lon) => {
+    try {
+      const result = await apiStartGame(city, farmName, lat, lon);
+      enterGame(result);
+    } catch (err: any) {
+      picker.showError(err.message ?? 'Standort konnte nicht angelegt werden');
+    }
+  });
+  picker.render();
+}
+
+// ── Spielstart nach erfolgreichem Login ───────────────────────────────────────
+async function startGame(): Promise<void> {
+  container.innerHTML = '<div class="loading-screen">Spielstand wird geladen…</div>';
+
+  const result = await apiLoadState();
+  if (result.isNewGame) {
+    showStartLocationPicker();
+    return;
+  }
+  enterGame(result);
+}
+
 // ── Auth-Flow ─────────────────────────────────────────────────────────────────
-function showAuth(): void {
+function showAuth(initialError?: string): void {
   const auth = new LandingUI(container, (token, username) => {
     localStorage.setItem('ft_token', token);
     localStorage.setItem('ft_username', username);
     startGame().catch(console.error);
-  });
+  }, initialError);
   auth.render();
 }
 
-// ── Einstiegspunkt ────────────────────────────────────────────────────────────
-if (isLoggedIn()) {
-  startGame().catch(err => {
-    console.error('[startGame]', err);
-    // Token ungültig/abgelaufen → neu anmelden
-    logout();
-    showAuth();
-  });
-} else {
-  showAuth();
+// Klick auf den per Mail verschickten Bestätigungslink (?verifyToken=…) — bestätigt die
+// E-Mail und loggt bei Erfolg direkt ein, ohne dass der Nutzer Zugangsdaten erneut eingeben muss.
+async function tryVerifyFromUrl(): Promise<boolean> {
+  const params = new URLSearchParams(window.location.search);
+  const token = params.get('verifyToken');
+  if (!token) return false;
+
+  window.history.replaceState({}, '', window.location.pathname);
+  try {
+    const { token: jwt, username } = await apiVerifyEmail(token);
+    localStorage.setItem('ft_token', jwt);
+    localStorage.setItem('ft_username', username);
+    return true;
+  } catch (err: any) {
+    verifyErrorMessage = err.message ?? 'Bestätigung fehlgeschlagen';
+    return false;
+  }
 }
+let verifyErrorMessage: string | undefined;
+
+// ── Einstiegspunkt ────────────────────────────────────────────────────────────
+async function bootstrap(): Promise<void> {
+  const verified = await tryVerifyFromUrl();
+
+  if (verified || isLoggedIn()) {
+    startGame().catch(err => {
+      console.error('[startGame]', err);
+      // Token ungültig/abgelaufen → neu anmelden
+      logout();
+      showAuth();
+    });
+  } else {
+    showAuth(verifyErrorMessage);
+  }
+}
+
+bootstrap();
