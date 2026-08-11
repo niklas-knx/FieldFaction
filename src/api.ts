@@ -140,10 +140,3 @@ export async function apiGetReputation(): Promise<{ reputation: Record<string, n
   const res = await fetch(`${BASE}/market/reputation`, { headers: authHeaders() });
   return handleResponse(res);
 }
-
-// ── Market: Info (Wettbewerb) ─────────────────────────────────────────────────
-
-export async function apiGetMarketInfo(city: string, merchantId: string): Promise<{ competition: Record<string, number> }> {
-  const res = await fetch(`${BASE}/market/info/${city}/${merchantId}`, { headers: authHeaders() });
-  return handleResponse(res);
-}

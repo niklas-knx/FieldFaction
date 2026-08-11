@@ -1,0 +1,40 @@
+services:
+  db:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: farmtycoon_dev
+      MYSQL_DATABASE: farmtycoon
+    volumes:
+      - db-data:/var/lib/mysql
+      - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-pfarmtycoon_dev"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build: .
+    restart: on-failure
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "3001:3001"
+    # JWT_SECRET/JWT_EXPIRES_IN kommen von hier (siehe server/.env.example) — die
+    # DB-Verbindung wird unten bewusst auf den "db"-Service überschrieben, damit
+    # dieser Stack unabhängig von einer eventuell lokal konfigurierten MySQL läuft.
+    env_file:
+      - server/.env
+    environment:
+      PORT: 3001
+      DB_HOST: db
+      DB_PORT: 3306
+      DB_USER: root
+      DB_PASSWORD: farmtycoon_dev
+      DB_NAME: farmtycoon
+      FRONTEND_ORIGIN: http://localhost:3001
+
+volumes:
+  db-data:
