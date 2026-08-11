@@ -33,6 +33,14 @@ export class LandingUI {
             ${Array.from({length: 12}, (_, i) => `<div class="lp-field-row lp-row-${i % 6}"></div>`).join('')}
           </div>
           <div class="lp-hero-content">
+            <!-- EARLY ACCESS HINWEIS -->
+            <div class="lp-ea-banner">
+              <span class="lp-ea-badge">🧪 Early Access</span>
+              <span class="lp-ea-text">
+                Das Spiel befindet sich in einer frühen Testphase. Schau gern rein und probier alles aus —
+                aber alle Spielstände werden zurückgesetzt, sobald die finale Version live geht.
+              </span>
+            </div>
             <div class="lp-crop-row" aria-hidden="true">
               <span>🌾</span><span>🚜</span><span>🐄</span><span>🌽</span><span>🍅</span><span>🌻</span><span>🏪</span>
             </div>
