@@ -36,6 +36,60 @@ export const BASE_PRICES: Record<string, number> = {
   flour: 0.90, cheese: 9.00, sunflower_oil: 3.20, butter: 7.00, jam: 2.80,
 };
 
+// ── Saisonalität ──────────────────────────────────────────────────────────────
+// Gleiche Erntesaison-Logik wie die client-seitigen dynamischen Kurse (src/farm/Farm.ts,
+// PRODUCT_SEASONALITY), aber am echten Kalenderjahr verankert statt am Spielstand-eigenen
+// Ticks/Tagen: Kundenanfragen sind ein geteilter Server-Zustand (eine Anfrage-Liste pro
+// Stadt für alle Spieler), es gibt also keinen einzelnen "Spielstand-Tag", an dem man sie
+// ausrichten könnte. Reale Jahreszeiten sorgen wenigstens dafür, dass ein Winter-Angebot
+// für Erdbeeren o.Ä. auch inhaltlich Sinn ergibt.
+type Season = 'spring' | 'summer' | 'autumn' | 'winter';
+interface SeasonalityDef { peak: Season; amplitude: number; }
+
+const PRODUCT_SEASONALITY: Record<string, SeasonalityDef> = {
+  wheat:         { peak: 'summer', amplitude: 0.12 },
+  potato:        { peak: 'autumn', amplitude: 0.12 },
+  corn:          { peak: 'autumn', amplitude: 0.12 },
+  tomato:        { peak: 'summer', amplitude: 0.12 },
+  sunflower:     { peak: 'autumn', amplitude: 0.12 },
+  strawberry:    { peak: 'spring', amplitude: 0.12 },
+  milk:          { peak: 'spring', amplitude: 0.10 },
+  eggs:          { peak: 'summer', amplitude: 0.10 },
+  beef:          { peak: 'autumn', amplitude: 0.10 },
+  flour:         { peak: 'summer', amplitude: 0.06 },
+  cheese:        { peak: 'spring', amplitude: 0.06 },
+  butter:        { peak: 'spring', amplitude: 0.06 },
+  sausage:       { peak: 'autumn', amplitude: 0.06 },
+  sunflower_oil: { peak: 'autumn', amplitude: 0.06 },
+  jam:           { peak: 'spring', amplitude: 0.06 },
+  egg_box:       { peak: 'summer', amplitude: 0.06 },
+  // pork, chicken_meat: ganzjährige Stallproduktion → keine Saisonalität
+};
+
+// Ungefährer Tag-des-Jahres der Saisonmitte (meteorologische Jahreszeiten, Nordhalbkugel)
+const SEASON_CENTER_DAY: Record<Season, number> = {
+  winter: 14,   // Mitte Januar
+  spring: 105,  // Mitte April
+  summer: 197,  // Mitte Juli
+  autumn: 288,  // Mitte Oktober
+};
+
+function dayOfYear(date: Date): number {
+  const start = Date.UTC(date.getUTCFullYear(), 0, 1);
+  return Math.floor((date.getTime() - start) / 86_400_000);
+}
+
+// Saisonaler Faktor als glatte Kosinuskurve übers (reale) Jahr: 1-amplitude in der
+// Erntesaison, 1+amplitude ein halbes Jahr später — analog zur Client-Logik.
+export function seasonalFactor(productId: string, date: Date = new Date()): number {
+  const def = PRODUCT_SEASONALITY[productId];
+  if (!def) return 1;
+  let diff = Math.abs(dayOfYear(date) - SEASON_CENTER_DAY[def.peak]);
+  if (diff > 365 / 2) diff = 365 - diff;
+  const angle = (diff / (365 / 2)) * Math.PI;
+  return 1 - def.amplitude * Math.cos(angle);
+}
+
 // Merchants available per city (keyed by city = farm meta id)
 export const CITY_MERCHANTS: Record<string, string[]> = {
   muenchen:  ['molkerei',       'fleischerei',  'grosshandel'  ],
@@ -74,7 +128,7 @@ export function getMerchantPrice(merchantId: string, productId: string): number 
   if (!mults) return 0;
   const mult = mults[productId] ?? mults.default ?? 0;
   if (mult <= 0) return 0;
-  return (BASE_PRICES[productId] ?? 0) * mult;
+  return (BASE_PRICES[productId] ?? 0) * mult * seasonalFactor(productId);
 }
 
 export function getMerchantDemand(merchantId: string, productId: string): number {

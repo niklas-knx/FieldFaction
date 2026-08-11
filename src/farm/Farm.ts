@@ -1,25 +1,190 @@
-import type { GameState, FarmLocation, Plot, StallSlot, Season, StallSize, ProcessingSlot, OwnedVehicle, OwnedImplement } from '../types';
+import type { GameState, FarmLocation, Plot, StallSlot, Season, StallSize, ProcessingSlot, OwnedVehicle, OwnedImplement, Delivery, Employee, EmployeeRole, MarketCredit } from '../types';
 import { VEHICLES } from '../data/vehicles';
 import { IMPLEMENTS } from '../data/implements';
 import { CROPS } from '../data/crops';
 import { ANIMALS, computeYield, getMaxAnimals, getBuyCost, getBreedingCycle, getStartingAnimals } from '../data/animals';
 import { PROCESSING_BUILDINGS, processingSpaceUnits, usedSpaceUnits, PLOT_TOTAL_UNITS } from '../data/processing';
 import { FARM_META } from '../data/farmLocations';
-import { PRODUCTS } from '../data/products';
+import { PRODUCTS, formatAmount } from '../data/products';
+import { EMPLOYEE_ROLES } from '../data/employees';
 import { bus } from '../core/EventBus';
 
-export const TICKS_PER_DAY     = 24;
+// Echtzeit-Spiel: 1 Tick = 1 Sekunde Echtzeit, 1 Spieltag = 1 echter Tag (86.400 Ticks) — wie Feldarbeit/Wachstum.
+export const TICKS_PER_DAY     = 86_400;
 export const DAYS_PER_SEASON   = 28;
 export const MAX_PLOTS         = 12;
 export const FIELD_WORK_TICKS  = 900; // 15 Minuten Traktorarbeit pro Parzelle
 
 export const PLOT_UNLOCK_COSTS = [0,0,0, 200,400,800, 1500,3000,5000, 8000,12000,18000];
 
+// ── Logistik ──────────────────────────────────────────────────────────────────
+export const TRANSPORT_CAPACITY      = 5000; // max. Einheiten pro Fahrt
+// 1 Tick = 1 Sekunde Echtzeit (wie Feldarbeit/Wachstum) — Fahrzeit entspricht also einer echten LKW-Fahrt.
+const TRANSPORT_BASE_TICKS   = 1800; // 30 Minuten Be-/Entladen am Standort
+const TRANSPORT_AVG_KMH      = 65;   // Ø-Geschwindigkeit LKW (Autobahn-Tempolimit, Pausen, Stadtverkehr eingerechnet)
+const TRANSPORT_TICKS_PER_KM = 3600 / TRANSPORT_AVG_KMH; // Sekunden Fahrzeit pro km Luftlinie
+
+// Luftlinien-Distanz zwischen zwei Standorten (Haversine)
+export function distanceKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 6371;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) ** 2
+    + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+export function transportDurationTicks(km: number): number {
+  return TRANSPORT_BASE_TICKS + Math.round(km * TRANSPORT_TICKS_PER_KM);
+}
+
+export function findFreeTransporter(state: GameState, farmId: string): OwnedVehicle | undefined {
+  return state.vehicles.find(v => v.farmId === farmId && v.defId === 'transporter' && v.inUseUntilTick <= state.tick);
+}
+
+export function startDelivery(
+  state: GameState, fromFarmId: string, toFarmId: string, productId: string, amount: number,
+): GameState {
+  if (fromFarmId === toFarmId) return state;
+  const fromFarm = state.farms[fromFarmId];
+  const fromMeta = state.farmMeta.find(m => m.id === fromFarmId);
+  const toMeta   = state.farmMeta.find(m => m.id === toFarmId);
+  if (!fromFarm || !fromMeta || !toMeta) return state;
+
+  const available = fromFarm.storage[productId] ?? 0;
+  const actual = Math.min(amount, available, TRANSPORT_CAPACITY);
+  if (actual <= 0) return state;
+
+  const truck  = findFreeTransporter(state, fromFarmId);
+  const driver = findFreeEmployee(state, fromFarmId, 'driver');
+  if (!truck)  { bus.emit('notification', '🚛 Kein freier Transporter am Standort — kaufe einen im Fahrzeug-Shop'); return state; }
+  if (!driver) { bus.emit('notification', '🚚 Kein freier LKW-Fahrer am Standort — stelle einen im Personal-Menü ein'); return state; }
+
+  const km = distanceKm(fromMeta.lat, fromMeta.lon, toMeta.lat, toMeta.lon);
+  const durationTicks = transportDurationTicks(km);
+  const arriveTick = state.tick + durationTicks;
+
+  const delivery: Delivery = {
+    id: state.nextDeliveryId,
+    vehicleUid: truck.uid,
+    fromFarmId, toFarmId, productId, amount: actual,
+    departTick: state.tick, arriveTick,
+  };
+
+  const prod = PRODUCTS[productId];
+  bus.emit('notification',
+    `🚛 ${formatAmount(actual, prod?.unit ?? '')} ${prod?.name ?? productId} unterwegs nach ${toMeta.city} (${Math.ceil(durationTicks / 60)} Min.)`);
+
+  const withStorage = updateFarm(state, fromFarmId, { storage: { ...fromFarm.storage, [productId]: available - actual } });
+  return {
+    ...withStorage,
+    vehicles: withStorage.vehicles.map(v => v.uid === truck.uid ? { ...v, inUseUntilTick: arriveTick } : v),
+    employees: withStorage.employees.map(e => e.uid === driver.uid ? { ...e, inUseUntilTick: arriveTick } : e),
+    deliveries: [...withStorage.deliveries, delivery],
+    nextDeliveryId: withStorage.nextDeliveryId + 1,
+  };
+}
+
 const SEASONS: Season[] = ['spring','summer','autumn','winter'];
 const SEASON_NAMES: Record<Season,string> = {
   spring:'Frühling', summer:'Sommer', autumn:'Herbst', winter:'Winter',
 };
 export const seasonName = (s: Season) => SEASON_NAMES[s];
+
+// ── Kurse ─────────────────────────────────────────────────────────────────────
+export const PRICE_HISTORY_DAYS = 30;
+const PRICE_REVERSION   = 0.15; // Anteil, zu dem sich der Kurs täglich Richtung Zielpreis bewegt
+const PRICE_VOLATILITY  = 0.03; // zufälliges Tagesrauschen, relativ zum Basispreis
+const PRICE_MIN_FACTOR  = 0.5;  // Untergrenze relativ zum Basispreis
+const PRICE_MAX_FACTOR  = 1.6;  // Obergrenze relativ zum Basispreis
+const YEAR_LENGTH_DAYS  = DAYS_PER_SEASON * 4; // 112 Tage/Jahr
+
+// Erntesaison (bzw. Hauptsaison) je Produkt — dort ist das Angebot hoch und der Kurs tendenziell
+// günstiger; ein halbes Jahr später (Nebensaison) ist es knapp und tendenziell teurer.
+// Rohprodukte schwanken stärker als daraus Verarbeitetes (Lagerpuffer glättet die Schwankung).
+interface SeasonalityDef { peak: Season; amplitude: number; }
+const PRODUCT_SEASONALITY: Record<string, SeasonalityDef> = {
+  // Feldfrüchte
+  wheat:         { peak: 'summer', amplitude: 0.12 },
+  potato:        { peak: 'autumn', amplitude: 0.12 },
+  corn:          { peak: 'autumn', amplitude: 0.12 },
+  tomato:        { peak: 'summer', amplitude: 0.12 },
+  sunflower:     { peak: 'autumn', amplitude: 0.12 },
+  strawberry:    { peak: 'spring', amplitude: 0.12 },
+  // Tierprodukte (Weide-/Legesaison bzw. traditionelle Herbstschlachtung)
+  milk:          { peak: 'spring', amplitude: 0.10 },
+  eggs:          { peak: 'summer', amplitude: 0.10 },
+  beef:          { peak: 'autumn', amplitude: 0.10 },
+  // Verarbeitete Produkte — folgen ihrem Rohstoff, gedämpft
+  flour:         { peak: 'summer', amplitude: 0.06 },
+  cheese:        { peak: 'spring', amplitude: 0.06 },
+  butter:        { peak: 'spring', amplitude: 0.06 },
+  sausage:       { peak: 'autumn', amplitude: 0.06 },
+  sunflower_oil: { peak: 'autumn', amplitude: 0.06 },
+  jam:           { peak: 'spring', amplitude: 0.06 },
+  egg_box:       { peak: 'summer', amplitude: 0.06 },
+  // pork, chicken_meat: ganzjährige Stallproduktion → keine Saisonalität
+};
+
+function seasonCenterDay(season: Season): number {
+  return SEASONS.indexOf(season) * DAYS_PER_SEASON + DAYS_PER_SEASON / 2;
+}
+
+// Saisonaler Faktor als glatte Kosinuskurve übers Jahr: 1-amplitude in der Erntesaison,
+// 1+amplitude ein halbes Jahr später, dazwischen stetiger Übergang (keine Sprünge am Saisonwechsel).
+function seasonalFactor(productId: string, dayOfYear: number): number {
+  const def = PRODUCT_SEASONALITY[productId];
+  if (!def) return 1;
+  let diff = Math.abs(dayOfYear - seasonCenterDay(def.peak));
+  if (diff > YEAR_LENGTH_DAYS / 2) diff = YEAR_LENGTH_DAYS - diff;
+  const angle = (diff / (YEAR_LENGTH_DAYS / 2)) * Math.PI;
+  return 1 - def.amplitude * Math.cos(angle);
+}
+
+// Saisonfaktor für die UI: null = Produkt hat keine Saisonalität hinterlegt
+export function seasonalPriceFactor(productId: string, day: number): number | null {
+  if (!PRODUCT_SEASONALITY[productId]) return null;
+  return seasonalFactor(productId, (day - 1) % YEAR_LENGTH_DAYS);
+}
+
+function initialMarketPrices(): Record<string, number> {
+  const prices: Record<string, number> = {};
+  Object.values(PRODUCTS).forEach(p => { prices[p.id] = p.sellPricePerUnit; });
+  return prices;
+}
+
+function initialPriceHistory(): Record<string, number[]> {
+  const history: Record<string, number[]> = {};
+  Object.values(PRODUCTS).forEach(p => { history[p.id] = [p.sellPricePerUnit]; });
+  return history;
+}
+
+function nextDailyPrice(base: number, target: number, current: number): number {
+  const reversion = (target - current) * PRICE_REVERSION;
+  const noise     = (Math.random() * 2 - 1) * base * PRICE_VOLATILITY;
+  const next      = current + reversion + noise;
+  const clamped   = Math.min(base * PRICE_MAX_FACTOR, Math.max(base * PRICE_MIN_FACTOR, next));
+  return Math.round(clamped * 100) / 100;
+}
+
+function advanceMarketPrices(state: GameState, newDay: number): Pick<GameState, 'marketPrices' | 'priceHistory'> {
+  const dayOfYear = (newDay - 1) % YEAR_LENGTH_DAYS;
+  const marketPrices: Record<string, number> = { ...state.marketPrices };
+  const priceHistory: Record<string, number[]> = { ...state.priceHistory };
+  for (const p of Object.values(PRODUCTS)) {
+    const current = marketPrices[p.id] ?? p.sellPricePerUnit;
+    const target   = p.sellPricePerUnit * seasonalFactor(p.id, dayOfYear);
+    const next     = nextDailyPrice(p.sellPricePerUnit, target, current);
+    marketPrices[p.id] = next;
+    priceHistory[p.id] = [...(priceHistory[p.id] ?? [p.sellPricePerUnit]), next].slice(-PRICE_HISTORY_DAYS);
+  }
+  return { marketPrices, priceHistory };
+}
+
+// Aktueller Kurs eines Produkts (fällt auf den statischen Basispreis zurück, z.B. für alte Spielstände)
+export function currentPrice(state: GameState, productId: string): number {
+  return state.marketPrices[productId] ?? PRODUCTS[productId]?.sellPricePerUnit ?? 0;
+}
 
 function emptyStallSlot(tick = 0): StallSlot {
   return { animalId: null, animalCount: 0, productionReady: false, lastCollectedAt: tick, lastBreedingAt: tick };
@@ -46,10 +211,17 @@ export function createInitialState(): GameState {
   return {
     money: 5_000, tick: 0, day: 1, season: 'spring', year: 1,
     farms, farmMeta: FARM_META, activeFarmId: 'muenchen',
-    employees: [], selectedCrop: 'wheat',
+    employees: [
+      { uid: 1, role: 'farmer', farmId: 'muenchen', wage: EMPLOYEE_ROLES.farmer.wagePerDay, inUseUntilTick: 0 },
+    ],
+    selectedCrop: 'wheat',
     stats: { totalHarvested: 0, totalEarned: 0 },
     paused: false,
     hofladen: {},
+    marketPrices: initialMarketPrices(),
+    priceHistory: initialPriceHistory(),
+    deliveries: [],
+    nextDeliveryId: 1,
     // Starter equipment — the old family farm machinery
     vehicles: [
       { uid: 1, defId: 'traktor', farmId: 'muenchen', inUseUntilTick: 0 },
@@ -59,6 +231,7 @@ export function createInitialState(): GameState {
       { uid: 3, defId: 'saemaschine', farmId: 'muenchen', inUseUntilTick: 0, pairedVehicleUid: null },
     ],
     nextVehicleUid: 4,
+    nextEmployeeUid: 2,
   };
 }
 
@@ -72,14 +245,37 @@ function updPlot(farm: FarmLocation, plotId: number, upd: Partial<Plot>): Plot[]
 
 // ── Tick ──────────────────────────────────────────────────────────────────────
 
-export function tickGame(state: GameState): GameState {
-  if (state.paused) return state;
+// Ereignisse, die während eines Ticks passiert sind — für einen "Willkommen zurück"-Rückblick
+// nach dem Offline-Nachholen gesammelt, statt einzeln als Notification zu feuern (würde bei
+// tausenden nachgeholten Ticks spammen).
+export interface DeliveryArrivedEvent { productId: string; amount: number; fromFarmId: string; toFarmId: string; }
+export interface EmployeeFiredEvent { role: EmployeeRole; wage: number; }
+
+export interface TickEvents {
+  fieldsHarvested: number;
+  stallCollectionsReady: number;
+  processingCompleted: number;
+  deliveriesArrived: DeliveryArrivedEvent[];
+  employeesFired: EmployeeFiredEvent[];
+  wagesPaid: number;
+}
+
+export function emptyTickEvents(): TickEvents {
+  return {
+    fieldsHarvested: 0, stallCollectionsReady: 0, processingCompleted: 0,
+    deliveriesArrived: [], employeesFired: [], wagesPaid: 0,
+  };
+}
+
+export function tickGame(state: GameState): { state: GameState; events: TickEvents } {
+  if (state.paused) return { state, events: emptyTickEvents() };
   const tick = state.tick + 1;
   const totalDays = Math.floor(tick / TICKS_PER_DAY);
   const day    = totalDays + 1;
   const season = SEASONS[Math.floor(totalDays / DAYS_PER_SEASON) % 4];
   const year   = Math.floor(totalDays / (DAYS_PER_SEASON * 4)) + 1;
 
+  const events = emptyTickEvents();
   const farms: Record<string, FarmLocation> = {};
   let statsDelta = { totalHarvested: 0, totalEarned: 0 };
   for (const [id, farm] of Object.entries(state.farms)) {
@@ -99,6 +295,7 @@ export function tickGame(state: GameState): GameState {
             if (crop) {
               storageGain[plot.cropId] = (storageGain[plot.cropId] ?? 0) + crop.yieldKg;
               statsDelta.totalHarvested += 1;
+              events.fieldsHarvested += 1;
             }
             return { ...plot, fieldState: 'fallow' as const, cropId: null, plantedAt: 0, growthTicks: 0, ...reset };
           }
@@ -118,8 +315,10 @@ export function tickGame(state: GameState): GameState {
           const maxAnimals   = getMaxAnimals(slot.animalId, plot.stallSize);
           const breedCycle   = getBreedingCycle(slot.animalId, plot.stallSize);
           let s = slot;
-          if (!animal.noProductCycle && !s.productionReady && tick - s.lastCollectedAt >= animal.cycleSeconds)
+          if (!animal.noProductCycle && !s.productionReady && tick - s.lastCollectedAt >= animal.cycleSeconds) {
             s = { ...s, productionReady: true };
+            events.stallCollectionsReady += 1;
+          }
           if (s.animalCount < maxAnimals && tick - s.lastBreedingAt >= breedCycle)
             s = { ...s, animalCount: s.animalCount + 1, lastBreedingAt: tick };
           return s;
@@ -138,6 +337,7 @@ export function tickGame(state: GameState): GameState {
           if (!b) return slot;
           if (tick - slot.cycleStartTick >= b.cycleSeconds) {
             changed = true;
+            events.processingCompleted += 1;
             const output = slot.customOutputAmount ?? b.outputAmount;
             return { ...slot, isProcessing: false, outputReady: slot.outputReady + output, customOutputAmount: undefined };
           }
@@ -153,14 +353,38 @@ export function tickGame(state: GameState): GameState {
     farms[id] = { ...farm, plots, storage: newStorage };
   }
 
-  let money = state.money;
-  if (day !== state.day) money -= state.employees.reduce((s, e) => s + e.wage, 0);
+  // Lieferungen: angekommene LKW-Fahrten ins Ziel-Lager einbuchen
+  const pendingDeliveries: Delivery[] = [];
+  for (const d of state.deliveries) {
+    if (tick < d.arriveTick) { pendingDeliveries.push(d); continue; }
+    const destFarm = farms[d.toFarmId];
+    if (!destFarm) continue;
+    farms[d.toFarmId] = {
+      ...destFarm,
+      storage: { ...destFarm.storage, [d.productId]: (destFarm.storage[d.productId] ?? 0) + d.amount },
+    };
+    events.deliveriesArrived.push({ productId: d.productId, amount: d.amount, fromFarmId: d.fromFarmId, toFarmId: d.toFarmId });
+  }
+
+  const dayChanged = day !== state.day; // 1 Spieltag = 1 echter Tag
+  const wageSettlement = dayChanged ? settleDailyWages(state) : undefined;
+  if (wageSettlement) {
+    events.wagesPaid += wageSettlement.wagesPaid;
+    wageSettlement.fired.forEach(e => events.employeesFired.push({ role: e.role, wage: e.wage }));
+  }
+  const priceUpdate = dayChanged ? advanceMarketPrices(state, day) : {};
   return {
-    ...state, tick, day, season, year, farms, money,
-    stats: {
-      totalHarvested: state.stats.totalHarvested + statsDelta.totalHarvested,
-      totalEarned: state.stats.totalEarned + statsDelta.totalEarned,
+    state: {
+      ...state, tick, day, season, year, farms,
+      ...(wageSettlement ? { money: wageSettlement.money, employees: wageSettlement.employees } : {}),
+      ...priceUpdate,
+      deliveries: pendingDeliveries,
+      stats: {
+        totalHarvested: state.stats.totalHarvested + statsDelta.totalHarvested,
+        totalEarned: state.stats.totalEarned + statsDelta.totalEarned,
+      },
     },
+    events,
   };
 }
 
@@ -229,6 +453,78 @@ function markInUse(state: GameState, vehicleUid: number, implementUid: number, d
   };
 }
 
+// ── Personal ──────────────────────────────────────────────────────────────────
+
+export function findFreeEmployee(state: GameState, farmId: string, role: EmployeeRole): Employee | undefined {
+  return state.employees.find(e => e.farmId === farmId && e.role === role && e.inUseUntilTick <= state.tick);
+}
+
+function markEmployeeInUse(state: GameState, uid: number, durationTicks: number): Pick<GameState, 'employees'> {
+  const until = state.tick + durationTicks;
+  return { employees: state.employees.map(e => e.uid === uid ? { ...e, inUseUntilTick: until } : e) };
+}
+
+export function hireEmployee(state: GameState, farmId: string, role: EmployeeRole): GameState {
+  const def = EMPLOYEE_ROLES[role];
+  const meta = state.farmMeta.find(m => m.id === farmId);
+  if (!def || !meta) return state;
+  if (state.money < def.hireCost) { bus.emit('notification', '💸 Nicht genug Geld!'); return state; }
+  const employee: Employee = { uid: state.nextEmployeeUid, role, farmId, wage: def.wagePerDay, inUseUntilTick: 0 };
+  bus.emit('notification', `${def.emoji} ${def.name} in ${meta.city} eingestellt`);
+  return {
+    ...state,
+    employees: [...state.employees, employee],
+    money: state.money - def.hireCost,
+    nextEmployeeUid: state.nextEmployeeUid + 1,
+  };
+}
+
+export function moveEmployee(state: GameState, uid: number, targetFarmId: string): GameState {
+  const meta = state.farmMeta.find(m => m.id === targetFarmId);
+  const e = state.employees.find(e => e.uid === uid);
+  if (!meta || !e) return state;
+  const def = EMPLOYEE_ROLES[e.role];
+  bus.emit('notification', `${def?.emoji ?? '👤'} ${def?.name ?? 'Mitarbeiter'} → ${meta.city} versetzt`);
+  return { ...state, employees: state.employees.map(x => x.uid === uid ? { ...x, farmId: targetFarmId } : x) };
+}
+
+export function fireEmployee(state: GameState, uid: number): GameState {
+  const e = state.employees.find(e => e.uid === uid);
+  if (!e) return state;
+  const def = EMPLOYEE_ROLES[e.role];
+  bus.emit('notification', `${def?.emoji ?? '👤'} ${def?.name ?? 'Mitarbeiter'} gekündigt`);
+  return { ...state, employees: state.employees.filter(x => x.uid !== uid) };
+}
+
+export function dailyPayroll(employees: Employee[]): number {
+  return employees.reduce((s, e) => s + e.wage, 0);
+}
+
+// Tägliche Lohnzahlung: reicht das Geld nicht für alle Löhne, kündigen die teuersten Mitarbeiter
+// zuerst von selbst, bis der Rest bezahlbar ist — der Kontostand rutscht dadurch nie ins Minus.
+interface WageSettlement { money: number; employees: Employee[]; wagesPaid: number; fired: Employee[]; }
+
+// Notification-frei (wird vom Aufrufer anhand der TickEvents ausgelöst — live sofort,
+// beim Offline-Nachholen gesammelt), damit tausende nachgeholte Ticks nicht spammen.
+function settleDailyWages(state: GameState): WageSettlement {
+  const payroll = dailyPayroll(state.employees);
+  if (payroll <= state.money) {
+    return { money: state.money - payroll, employees: state.employees, wagesPaid: payroll, fired: [] };
+  }
+  const remaining = [...state.employees].sort((a, b) => b.wage - a.wage);
+  const fired: Employee[] = [];
+  while (remaining.length > 0 && dailyPayroll(remaining) > state.money) {
+    fired.push(remaining.shift()!);
+  }
+  const finalPayroll = dailyPayroll(remaining);
+  return {
+    money: Math.max(0, state.money - finalPayroll),
+    employees: state.employees.filter(e => remaining.some(r => r.uid === e.uid)),
+    wagesPaid: finalPayroll,
+    fired,
+  };
+}
+
 // Marks a parcel as a permanent field (no equipment needed — just land-use designation).
 export function designateField(state: GameState, farmId: string, plotId: number): GameState {
   const farm = state.farms[farmId];
@@ -245,8 +541,10 @@ export function tillPlot(state: GameState, farmId: string, plotId: number): Game
 
   const tractor = findFreeTractor(state, farmId);
   const pflug   = findFreeImpl(state, farmId, 'till');
+  const farmer  = findFreeEmployee(state, farmId, 'farmer');
   if (!tractor) { bus.emit('notification', '🚜 Kein freier Traktor am Standort — kaufe einen im Fahrzeug-Shop'); return state; }
   if (!pflug)   { bus.emit('notification', '⛏️ Kein freier Pflug am Standort — kaufe ein Anbaugerät im Shop'); return state; }
+  if (!farmer)  { bus.emit('notification', '👨‍🌾 Kein freier Farmer am Standort — stelle einen im Personal-Menü ein'); return state; }
 
   bus.emit('notification', '⛏️ Pflügen gestartet…');
   return {
@@ -255,6 +553,7 @@ export function tillPlot(state: GameState, farmId: string, plotId: number): Game
       actionStartTick: state.tick, actionDurationTicks: FIELD_WORK_TICKS,
     }) }),
     ...markInUse(state, tractor.uid, pflug.uid, FIELD_WORK_TICKS),
+    ...markEmployeeInUse(state, farmer.uid, FIELD_WORK_TICKS),
   };
 }
 
@@ -268,8 +567,10 @@ export function plantCrop(state: GameState, farmId: string, plotId: number, crop
 
   const tractor = findFreeTractor(state, farmId);
   const saem    = findFreeImpl(state, farmId, 'plant');
+  const farmer  = findFreeEmployee(state, farmId, 'farmer');
   if (!tractor) { bus.emit('notification', '🚜 Kein freier Traktor am Standort — kaufe einen im Fahrzeug-Shop'); return state; }
   if (!saem)    { bus.emit('notification', '🌱 Keine freie Sämaschine am Standort — kaufe ein Anbaugerät im Shop'); return state; }
+  if (!farmer)  { bus.emit('notification', '👨‍🌾 Kein freier Farmer am Standort — stelle einen im Personal-Menü ein'); return state; }
 
   bus.emit('notification', `🌱 ${crop.name} wird gesät…`);
   return {
@@ -280,6 +581,7 @@ export function plantCrop(state: GameState, farmId: string, plotId: number, crop
     })}),
     money: state.money - crop.seedCost,
     ...markInUse(state, tractor.uid, saem.uid, FIELD_WORK_TICKS),
+    ...markEmployeeInUse(state, farmer.uid, FIELD_WORK_TICKS),
   };
 }
 
@@ -295,7 +597,9 @@ export function harvestPlot(state: GameState, farmId: string, plotId: number): G
     v.farmId === farmId && v.inUseUntilTick <= state.tick &&
     (v.defId === 'traktor' || v.defId === 'maehdrescher')
   );
+  const farmer = findFreeEmployee(state, farmId, 'farmer');
   if (!harvester) { bus.emit('notification', '🚜 Kein freies Fahrzeug zum Ernten — Traktor oder Mähdrescher nötig'); return state; }
+  if (!farmer)    { bus.emit('notification', '👨‍🌾 Kein freier Farmer am Standort — stelle einen im Personal-Menü ein'); return state; }
 
   bus.emit('notification', `🌾 ${crop.name} wird geerntet…`);
   return {
@@ -306,6 +610,7 @@ export function harvestPlot(state: GameState, farmId: string, plotId: number): G
     vehicles: state.vehicles.map(v =>
       v.uid === harvester.uid ? { ...v, inUseUntilTick: state.tick + FIELD_WORK_TICKS } : v
     ),
+    ...markEmployeeInUse(state, farmer.uid, FIELD_WORK_TICKS),
   };
 }
 
@@ -604,7 +909,7 @@ export function sellFromStorage(state: GameState, farmId: string, productId: str
   if (actual <= 0) return state;
   const product = PRODUCTS[productId];
   if (!product) return state;
-  const earned = Math.round(actual * product.sellPricePerUnit);
+  const earned = Math.round(actual * currentPrice(state, productId));
   const amtLabel = actual >= 1000 && product.unit === 'kg'
     ? (actual/1000).toFixed(1)+'t'
     : `${actual} ${product.unit}`;
@@ -724,4 +1029,33 @@ export function countFreeImplements(state: GameState, farmId: string, task: stri
   return state.implements.filter(
     i => i.farmId === farmId && IMPLEMENTS[i.defId]?.task === task && i.inUseUntilTick <= state.tick
   ).length;
+}
+
+// Wendet gewonnene Markt-Gebote/Hofladen-Verkäufe (server-seitig in market_credits
+// gesammelt, siehe server/src/market/matching.ts) auf einen Spielstand an: Geld gutschreiben,
+// verkaufte Ware aus dem Lager abziehen. Reine State-Logik, deshalb hier statt in api.ts —
+// so kann sowohl der Server (beim Laden/Fortschreiben eines Standes) als auch der Client
+// (für optimistisches Rendering) dieselbe Funktion nutzen.
+export function applyMarketCredits(state: GameState, credits: MarketCredit[]): GameState {
+  let s = state;
+  for (const credit of credits) {
+    s = { ...s, money: s.money + credit.amountEur };
+    for (const change of credit.productChanges) {
+      const farm = s.farms[change.farmId];
+      if (!farm) continue;
+      const current = farm.storage[change.productId] ?? 0;
+      const newAmt   = Math.max(0, current + change.amount);
+      s = {
+        ...s,
+        farms: {
+          ...s.farms,
+          [change.farmId]: {
+            ...farm,
+            storage: { ...farm.storage, [change.productId]: newAmt },
+          },
+        },
+      };
+    }
+  }
+  return s;
 }

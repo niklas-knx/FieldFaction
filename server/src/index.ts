@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import helmet from 'helmet';
 import dotenv from 'dotenv';
 import path from 'path';
 import { testConnection, initTables } from './db';
@@ -15,6 +16,11 @@ const PORT = Number(process.env.PORT ?? 3001);
 const MATCHING_INTERVAL_MS = 60_000; // 60 Sekunden
 
 // ── Middleware ────────────────────────────────────────────────────────────────
+app.use(helmet({
+  // Deaktiviert: würde das von uns selbst ausgelieferte Frontend-Bundle blockieren,
+  // ohne dass wir aktuell eine echte CSP-Policy pflegen.
+  contentSecurityPolicy: false,
+}));
 app.use(cors({
   origin: process.env.FRONTEND_ORIGIN ?? 'http://localhost:5173',
   credentials: true,

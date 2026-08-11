@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { pool } from '../db';
 import { requireAuth } from '../middleware/auth';
+import { marketWriteLimiter } from '../middleware/rateLimit';
 import { CITY_MERCHANTS, getMerchantPrice } from '../data/merchantData';
 
 const router = Router();
@@ -56,7 +57,7 @@ router.get('/requests', requireAuth, async (req: Request, res: Response) => {
 
 // ── Angebot abgeben ───────────────────────────────────────────────────────────
 
-router.post('/bid', requireAuth, async (req: Request, res: Response) => {
+router.post('/bid', requireAuth, marketWriteLimiter, async (req: Request, res: Response) => {
   const userId = req.user!.userId;
   const { requestId, farmId, pricePerUnit, quantityOffered } = req.body ?? {};
 
@@ -144,7 +145,7 @@ router.get('/bids', requireAuth, async (req: Request, res: Response) => {
 
 // ── Angebot zurückziehen ──────────────────────────────────────────────────────
 
-router.delete('/bid/:id', requireAuth, async (req: Request, res: Response) => {
+router.delete('/bid/:id', requireAuth, marketWriteLimiter, async (req: Request, res: Response) => {
   const userId = req.user!.userId;
   const bidId  = Number(req.params.id);
   if (!Number.isFinite(bidId)) return res.status(400).json({ error: 'Ungültige ID' });
@@ -160,47 +161,11 @@ router.delete('/bid/:id', requireAuth, async (req: Request, res: Response) => {
   }
 });
 
-// ── Credits abrufen ───────────────────────────────────────────────────────────
-
-router.get('/credits', requireAuth, async (req: Request, res: Response) => {
-  const userId = req.user!.userId;
-  try {
-    const [rows]: any = await pool.execute(
-      'SELECT id, amount_eur, product_changes_json, description FROM market_credits WHERE user_id = ? AND applied = 0 ORDER BY created_at ASC',
-      [userId]
-    );
-    return res.json({
-      credits: rows.map((r: any) => ({
-        id: r.id,
-        amountEur: r.amount_eur,
-        productChanges: JSON.parse(r.product_changes_json ?? '[]'),
-        description: r.description,
-      })),
-    });
-  } catch (err) {
-    console.error('[market/credits GET]', err);
-    return res.status(500).json({ error: 'Serverfehler' });
-  }
-});
-
-// ── Credits als angewendet markieren ─────────────────────────────────────────
-
-router.post('/credits/apply', requireAuth, async (req: Request, res: Response) => {
-  const userId = req.user!.userId;
-  const { ids } = req.body ?? {};
-  if (!Array.isArray(ids) || ids.length === 0) return res.status(400).json({ error: 'Keine IDs' });
-  const ph = ids.map(() => '?').join(',');
-  try {
-    await pool.execute(
-      `UPDATE market_credits SET applied = 1 WHERE user_id = ? AND id IN (${ph})`,
-      [userId, ...ids]
-    );
-    return res.json({ ok: true });
-  } catch (err) {
-    console.error('[market/credits/apply POST]', err);
-    return res.status(500).json({ error: 'Serverfehler' });
-  }
-});
+// Hinweis: Ein GET/POST-Paar zum Abrufen und "als angewendet markieren" von
+// Markt-Credits gab es hier früher — seit Issue #7 bucht der Server offene Credits
+// automatisch ein, sobald er ohnehin einen Spielstand lädt (siehe
+// server/src/routes/game.ts, applyPendingCredits()), daher entfällt der eigene
+// Polling-Endpunkt für den Client.
 
 // ── Reputation abrufen ────────────────────────────────────────────────────────
 

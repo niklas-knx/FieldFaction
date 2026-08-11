@@ -1,20 +1,19 @@
-import type { GameState, Plot, StallSize, FarmMeta, MarketRequest, MarketBid, HofladenOffer } from '../types';
+import type { GameState, Plot, StallSize, FarmMeta, MarketRequest, MarketBid, HofladenOffer, EmployeeRole } from '../types';
 import * as L from 'leaflet';
 import { CROPS, CROP_LIST } from '../data/crops';
 import { ANIMALS, ANIMAL_LIST, happinessLabel, happinessHearts, computeYield, getMaxAnimals, getBuyCost, getBreedingCycle } from '../data/animals';
 import { PRODUCTS, formatAmount, productValue, totalStorageValue } from '../data/products';
 import {
-  growthProgress, slotProgress, slotBreedProgress, seasonName, farmReadyCount, nextBuyablePlot,
-  setActiveFarm, unlockFarm, openNewFarm, buyPlot, tillPlot, plantCrop, harvestPlot,
-  buildStall, buildSecondHalfStall, collectStall, buyAnimal, sellFromStorage,
-  buildProcessingBuilding, loadProcessing, collectProcessingOutput, procProgress,
-  setSlaughterTarget, setSlaughterAnimal, countFarmAnimals,
-  buyVehicle, moveVehicle, buyImplement, moveImplement,
-  designateField, demolishPlot, sellToMerchant,
-  TICKS_PER_DAY, DAYS_PER_SEASON,
+  growthProgress, slotProgress, slotBreedProgress, farmReadyCount, nextBuyablePlot,
+  setActiveFarm, procProgress, countFarmAnimals,
+  currentPrice, seasonalPriceFactor,
+  findFreeTransporter, distanceKm, transportDurationTicks, TRANSPORT_CAPACITY,
+  findFreeEmployee, dailyPayroll,
+  DAYS_PER_SEASON, PRICE_HISTORY_DAYS,
 } from '../farm/Farm';
 import { VEHICLE_LIST, VEHICLES, TASK_LABELS } from '../data/vehicles';
 import { IMPLEMENT_LIST, IMPLEMENTS, IMPLEMENT_TASK_LABELS } from '../data/implements';
+import { EMPLOYEE_ROLE_LIST, EMPLOYEE_ROLES } from '../data/employees';
 import { MERCHANTS, CITY_MERCHANTS, merchantPrice, topOffers } from '../data/merchants';
 import { NEW_LOCATION_COST } from '../data/farmLocations';
 import {
@@ -25,17 +24,28 @@ import type { StallSlot } from '../types';
 import { bus } from '../core/EventBus';
 import {
   apiGetMarketRequests, apiSubmitBid, apiGetMyBids, apiCancelBid,
-  apiGetReputation,
+  apiGetReputation, apiDispatchAction,
 } from '../api';
 import { CITY_PROFILES } from '../data/cityProfiles';
 
 const navExpanded: Record<string, boolean> = { agriculture: true };
 
+export interface WelcomeBackSummary {
+  offlineSeconds: number;
+  fieldsHarvested: number;
+  stallCollectionsReady: number;
+  processingCompleted: number;
+  deliveriesArrived: Array<{ productId: string; amount: number; fromFarmId: string; toFarmId: string }>;
+  employeesFired: Array<{ role: EmployeeRole; wage: number }>;
+  wagesPaid: number;
+  topPriceMoves: Array<{ productId: string; fromPrice: number; toPrice: number; pctChange: number }>;
+}
+
 export class FarmUI {
   private container: HTMLElement;
   private state!: GameState;
   private onStateChange: (s: GameState) => void;
-  private currentView: 'farm' | 'map' | 'vehicles' | 'market' = 'farm';
+  private currentView: 'farm' | 'map' | 'vehicles' | 'market' | 'prices' | 'logistics' | 'employees' | 'processing' = 'farm';
   private selectedMerchantId: string | null = null;
   private selectedMerchantFarmId: string | null = null;
   private leafletMap: L.Map | null = null;
@@ -50,12 +60,44 @@ export class FarmUI {
   private marketBids: MarketBid[] = [];
   private marketReputation: Record<string, number> = {};
   private expandedRequestId: number | null = null;
+  // Kurse
+  private priceViewProductId: string = 'wheat';
+  // Logistik
+  private deliveryFromFarmId: string | null = null;
+  private deliveryToFarmId: string | null = null;
+  private deliveryProductId: string | null = null;
+  // Seit Issue #7: State kommt ausschließlich vom Server. lastSyncTick/lastSyncAtMs
+  // verankern, wann state.tick zuletzt vom Server bestätigt wurde, damit displayTick()
+  // zwischen zwei Syncs rein kosmetisch (ohne eigene State-Mutation) weiterzählen kann.
+  private lastSyncTick: number = 0;
+  private lastSyncAtMs: number = Date.now();
 
   constructor(container: HTMLElement, onStateChange: (s: GameState) => void) {
     this.container = container;
     this.onStateChange = onStateChange;
     this.buildShell();
     bus.on<string>('notification', text => this.showNotification(text));
+  }
+
+  // Einziger Weg, den Spielzustand zu verändern (siehe Issue #7): schickt eine Absicht
+  // an den Server, übernimmt den zurückgegebenen (serverseitig berechneten) State und
+  // zeigt Ablehnungsgründe (kein Geld, keine freie Maschine, …) als Notification an.
+  // Aufrufer rendern nach dem Await selbst die betroffenen Bereiche neu.
+  private async dispatch(type: string, args: unknown[]): Promise<void> {
+    try {
+      const result = await apiDispatchAction(type, args);
+      this.state = result.state;
+      this.onStateChange(this.state);
+      result.notifications.forEach(text => bus.emit('notification', text));
+    } catch (err: any) {
+      bus.emit('notification', `❌ ${err.message ?? 'Fehler'}`);
+    }
+  }
+
+  // Rein kosmetischer "jetzt"-Tick für Fortschrittsbalken/Restzeiten zwischen zwei
+  // Server-Syncs — mutiert nie state.tick selbst, nur die Anzeige rechnet damit hoch.
+  private displayTick(): number {
+    return this.state.tick + Math.floor((Date.now() - this.lastSyncAtMs) / 1000);
   }
 
   private buildShell(): void {
@@ -164,6 +206,10 @@ export class FarmUI {
   }
 
   render(state: GameState): void {
+    if (state.tick !== this.lastSyncTick) {
+      this.lastSyncTick = state.tick;
+      this.lastSyncAtMs = Date.now();
+    }
     this.state = state;
     this.renderHUD();
     this.renderNav();
@@ -179,6 +225,26 @@ export class FarmUI {
     } else if (this.currentView === 'market') {
       this.destroyLeafletMap();
       this.renderMarketView();
+    } else if (this.currentView === 'prices') {
+      this.destroyLeafletMap();
+      this.renderPricesView();
+      const sidebarEl = document.getElementById('info-sidebar');
+      if (sidebarEl) sidebarEl.innerHTML = '';
+    } else if (this.currentView === 'logistics') {
+      this.destroyLeafletMap();
+      this.renderLogisticsView();
+      const sidebarEl = document.getElementById('info-sidebar');
+      if (sidebarEl) sidebarEl.innerHTML = '';
+    } else if (this.currentView === 'employees') {
+      this.destroyLeafletMap();
+      this.renderEmployeesView();
+      const sidebarEl = document.getElementById('info-sidebar');
+      if (sidebarEl) sidebarEl.innerHTML = '';
+    } else if (this.currentView === 'processing') {
+      this.destroyLeafletMap();
+      this.renderProcessingView();
+      const sidebarEl = document.getElementById('info-sidebar');
+      if (sidebarEl) sidebarEl.innerHTML = '';
     } else {
       this.destroyLeafletMap();
       this.renderFarmArea();
@@ -241,31 +307,44 @@ export class FarmUI {
         <button class="nav-section-header ${isMapActive ? 'nav-section-map-active' : ''}" id="nav-karte-btn">
           <span class="nav-section-icon">🗺</span>
           <span class="nav-section-title">Karte</span>
-          <span class="nav-section-soon">${this.state.farmMeta.filter(m => m.unlocked).length} Standorte</span>
         </button>
       </div>
       <div class="nav-section">
         <button class="nav-section-header ${this.currentView === 'vehicles' ? 'nav-section-map-active' : ''}" id="nav-vehicles-btn">
           <span class="nav-section-icon">🚜</span>
           <span class="nav-section-title">Fahrzeuge</span>
-          <span class="nav-section-soon">${this.state.vehicles.length} im Besitz</span>
         </button>
       </div>
       <div class="nav-section">
         <button class="nav-section-header ${this.currentView === 'market' ? 'nav-section-map-active' : ''}" id="nav-market-btn">
           <span class="nav-section-icon">📈</span>
           <span class="nav-section-title">Markt</span>
-          <span class="nav-section-soon">${this.state.farmMeta.filter(m => m.unlocked).length} Standorte</span>
         </button>
       </div>
-      ${['⚙️ Verarbeitung','🚛 Logistik'].map(t => `
-        <div class="nav-section">
-          <button class="nav-section-header nav-section-disabled">
-            <span class="nav-chevron">›</span>
-            <span class="nav-section-title">${t}</span>
-            <span class="nav-section-soon">bald</span>
-          </button>
-        </div>`).join('')}
+      <div class="nav-section">
+        <button class="nav-section-header ${this.currentView === 'prices' ? 'nav-section-map-active' : ''}" id="nav-prices-btn">
+          <span class="nav-section-icon">📊</span>
+          <span class="nav-section-title">Kurse</span>
+        </button>
+      </div>
+      <div class="nav-section">
+        <button class="nav-section-header ${this.currentView === 'logistics' ? 'nav-section-map-active' : ''}" id="nav-logistics-btn">
+          <span class="nav-section-icon">🚛</span>
+          <span class="nav-section-title">Logistik</span>
+        </button>
+      </div>
+      <div class="nav-section">
+        <button class="nav-section-header ${this.currentView === 'employees' ? 'nav-section-map-active' : ''}" id="nav-employees-btn">
+          <span class="nav-section-icon">👥</span>
+          <span class="nav-section-title">Mitarbeiter</span>
+        </button>
+      </div>
+      <div class="nav-section">
+        <button class="nav-section-header ${this.currentView === 'processing' ? 'nav-section-map-active' : ''}" id="nav-processing-btn">
+          <span class="nav-section-icon">⚙️</span>
+          <span class="nav-section-title">Verarbeitung</span>
+        </button>
+      </div>
       <div class="nav-footer">
         <div class="nav-stat"><span>Geerntet</span><strong>${this.state.stats.totalHarvested}×</strong></div>
         <div class="nav-stat"><span>Einnahmen</span><strong>${this.state.stats.totalEarned.toLocaleString('de-DE')} €</strong></div>
@@ -280,10 +359,9 @@ export class FarmUI {
       this.onStateChange(this.state);
       this.render(this.state);
     }));
-    el.querySelectorAll('[data-nav-unlock]').forEach(b => b.addEventListener('click', () => {
-      this.state = unlockFarm(this.state, (b as HTMLElement).dataset.navUnlock!);
+    el.querySelectorAll('[data-nav-unlock]').forEach(b => b.addEventListener('click', async () => {
+      await this.dispatch('unlockFarm', [(b as HTMLElement).dataset.navUnlock!]);
       this.currentView = 'farm';
-      this.onStateChange(this.state);
       this.render(this.state);
     }));
     document.getElementById('nav-new-location')?.addEventListener('click', () => {
@@ -306,6 +384,22 @@ export class FarmUI {
     });
     document.getElementById('nav-market-btn')?.addEventListener('click', () => {
       this.currentView = this.currentView === 'market' ? 'farm' : 'market';
+      this.render(this.state);
+    });
+    document.getElementById('nav-prices-btn')?.addEventListener('click', () => {
+      this.currentView = this.currentView === 'prices' ? 'farm' : 'prices';
+      this.render(this.state);
+    });
+    document.getElementById('nav-logistics-btn')?.addEventListener('click', () => {
+      this.currentView = this.currentView === 'logistics' ? 'farm' : 'logistics';
+      this.render(this.state);
+    });
+    document.getElementById('nav-employees-btn')?.addEventListener('click', () => {
+      this.currentView = this.currentView === 'employees' ? 'farm' : 'employees';
+      this.render(this.state);
+    });
+    document.getElementById('nav-processing-btn')?.addEventListener('click', () => {
+      this.currentView = this.currentView === 'processing' ? 'farm' : 'processing';
       this.render(this.state);
     });
   }
@@ -352,10 +446,9 @@ export class FarmUI {
     const grid = document.getElementById('fields-grid')!;
     owned.forEach(plot => grid.appendChild(this.buildPlotCard(plot)));
 
-    document.getElementById('buy-next-plot')?.addEventListener('click', () => {
+    document.getElementById('buy-next-plot')?.addEventListener('click', async () => {
       if (!next) return;
-      this.state = buyPlot(this.state, farmId, next.id);
-      this.onStateChange(this.state);
+      await this.dispatch('buyPlot', [farmId, next.id]);
       this.renderHUD(); this.renderNav(); this.renderFarmArea(); this.renderInfoSidebar();
     });
 
@@ -376,7 +469,7 @@ export class FarmUI {
     const vehicleRows = farmVehicles.map(v => {
       const def = VEHICLES[v.defId];
       if (!def) return '';
-      const free = v.inUseUntilTick <= this.state.tick;
+      const free = v.inUseUntilTick <= this.displayTick();
       return `<div class="farm-fleet-card">
         <span class="fleet-card-emoji">${def.emoji}</span>
         <div class="fleet-card-info">
@@ -391,7 +484,7 @@ export class FarmUI {
     const implementRows = farmImplements.map(i => {
       const def = IMPLEMENTS[i.defId];
       if (!def) return '';
-      const free = i.inUseUntilTick <= this.state.tick;
+      const free = i.inUseUntilTick <= this.displayTick();
       return `<div class="farm-fleet-card farm-fleet-card-impl">
         <span class="fleet-card-emoji">${def.emoji}</span>
         <div class="fleet-card-info">
@@ -400,6 +493,24 @@ export class FarmUI {
         </div>
         <span class="fleet-status ${free ? 'fleet-status-free' : 'fleet-status-busy'}">${free ? 'Frei' : 'Belegt'}</span>
         ${relocateSelect(i.uid, false)}
+      </div>`;
+    }).join('');
+
+    // Personal for this farm
+    const farmEmployees = this.state.employees.filter(e => e.farmId === farmId);
+    const employeeRows = farmEmployees.map(e => {
+      const def  = EMPLOYEE_ROLES[e.role];
+      const free = e.inUseUntilTick <= this.displayTick();
+      return `<div class="farm-fleet-card">
+        <span class="fleet-card-emoji">${def.emoji}</span>
+        <div class="fleet-card-info">
+          <span class="fleet-card-name">${def.name}</span>
+          <span class="fleet-card-tasks">${def.wagePerDay.toLocaleString('de-DE')} €/Tag Lohn</span>
+        </div>
+        <span class="fleet-status ${free ? 'fleet-status-free' : 'fleet-status-busy'}">${free ? 'Frei' : 'Belegt'}</span>
+        ${unlockedFarms.length > 1 ? `<select class="fleet-card-relocate" data-employee-uid="${e.uid}">
+          ${unlockedFarms.map(m => `<option value="${m.id}" ${m.id === farmId ? 'selected' : ''}>${m.city}</option>`).join('')}
+        </select>` : ''}
       </div>`;
     }).join('');
 
@@ -413,25 +524,39 @@ export class FarmUI {
       ${total === 0
         ? '<p class="text-muted farm-fleet-empty">Keine Fahrzeuge hier · <a class="fleet-shop-link-2" href="#">Im Shop kaufen</a></p>'
         : `${farmVehicles.length > 0 ? vehicleRows : ''}
-           ${farmImplements.length > 0 ? `<div class="fleet-impl-sep">Anbaugeräte</div>${implementRows}` : ''}`}`;
+           ${farmImplements.length > 0 ? `<div class="fleet-impl-sep">Anbaugeräte</div>${implementRows}` : ''}`}
+      <div class="fleet-impl-sep">Personal · <a class="fleet-hire-link" href="#">Einstellen</a></div>
+      ${farmEmployees.length === 0
+        ? '<p class="text-muted farm-fleet-empty">Niemand hier eingestellt</p>'
+        : employeeRows}`;
 
     el.appendChild(fleetEl);
 
     fleetEl.querySelectorAll('.fleet-shop-link, .fleet-shop-link-2').forEach(a => {
       a.addEventListener('click', e => { e.preventDefault(); this.currentView = 'vehicles'; this.render(this.state); });
     });
+    fleetEl.querySelectorAll('.fleet-hire-link').forEach(a => {
+      a.addEventListener('click', e => { e.preventDefault(); this.currentView = 'employees'; this.render(this.state); });
+    });
     fleetEl.querySelectorAll('[data-vehicle-uid]').forEach(sel => {
-      sel.addEventListener('change', () => {
+      sel.addEventListener('change', async () => {
         const uid = parseInt((sel as HTMLSelectElement).dataset.vehicleUid!);
-        this.state = moveVehicle(this.state, uid, (sel as HTMLSelectElement).value);
-        this.onStateChange(this.state); this.renderHUD(); this.renderNav(); this.renderFarmArea();
+        await this.dispatch('moveVehicle', [uid, (sel as HTMLSelectElement).value]);
+        this.renderHUD(); this.renderNav(); this.renderFarmArea();
       });
     });
     fleetEl.querySelectorAll('[data-implement-uid]').forEach(sel => {
-      sel.addEventListener('change', () => {
+      sel.addEventListener('change', async () => {
         const uid = parseInt((sel as HTMLSelectElement).dataset.implementUid!);
-        this.state = moveImplement(this.state, uid, (sel as HTMLSelectElement).value);
-        this.onStateChange(this.state); this.renderHUD(); this.renderNav(); this.renderFarmArea();
+        await this.dispatch('moveImplement', [uid, (sel as HTMLSelectElement).value]);
+        this.renderHUD(); this.renderNav(); this.renderFarmArea();
+      });
+    });
+    fleetEl.querySelectorAll('[data-employee-uid]').forEach(sel => {
+      sel.addEventListener('change', async () => {
+        const uid = parseInt((sel as HTMLSelectElement).dataset.employeeUid!);
+        await this.dispatch('moveEmployee', [uid, (sel as HTMLSelectElement).value]);
+        this.renderHUD(); this.renderNav(); this.renderFarmArea();
       });
     });
   }
@@ -570,14 +695,13 @@ export class FarmUI {
     });
   }
 
-  private executeBuy(defId: string, farmId: string): void {
+  private async executeBuy(defId: string, farmId: string): Promise<void> {
     if (this.pendingBuyCategory === 'implement') {
-      this.state = buyImplement(this.state, defId, farmId);
+      await this.dispatch('buyImplement', [defId, farmId]);
     } else {
-      this.state = buyVehicle(this.state, defId, farmId);
+      await this.dispatch('buyVehicle', [defId, farmId]);
     }
     this.pendingBuyDefId = null;
-    this.onStateChange(this.state);
     this.renderHUD(); this.renderNav(); this.renderVehicleShop();
   }
 
@@ -874,7 +998,7 @@ export class FarmUI {
       // Offer-Zeilen
       const offerRows = config.offers.map((offer, idx) => {
         const prod     = PRODUCTS[offer.productId];
-        const base     = prod?.sellPricePerUnit ?? 1;
+        const base     = currentPrice(this.state, offer.productId) || 1;
         const pctAbove = Math.round(((offer.pricePerUnit / base) - 1) * 100);
         const available = Math.floor(farm?.storage[offer.productId] ?? 0);
         return `<div class="hofladen-offer-row">
@@ -964,7 +1088,7 @@ export class FarmUI {
         const limitPerRound = Number(limitInp.value) || 100;
 
         if (!productId || pricePerUnit <= 0) { bus.emit('notification', '❌ Preis eingeben'); return; }
-        const base    = PRODUCTS[productId]?.sellPricePerUnit ?? 1;
+        const base    = currentPrice(this.state, productId) || 1;
         const maxPrice = base * 1.8;
         if (pricePerUnit > maxPrice) { bus.emit('notification', `❌ Max. ${maxPrice.toFixed(2)} € (1,8× Basispreis)`); return; }
 
@@ -1106,9 +1230,8 @@ export class FarmUI {
           this.render(this.state);
         });
       } else if (canBuy) {
-        marker.on('click', () => {
-          this.state = unlockFarm(this.state, meta.id);
-          this.onStateChange(this.state);
+        marker.on('click', async () => {
+          await this.dispatch('unlockFarm', [meta.id]);
           this.renderHUD(); this.renderNav(); this.refreshLeafletMarkers();
         });
       }
@@ -1135,7 +1258,7 @@ export class FarmUI {
   private buildFieldCard(plot: Plot): HTMLElement {
     const card = document.createElement('div');
     const crop = plot.cropId ? CROPS[plot.cropId] : null;
-    const prog = growthProgress(plot, this.state.tick);
+    const prog = growthProgress(plot, this.displayTick());
     card.className = `field-card field-card-${plot.fieldState}`;
 
     if (['empty','fallow','tilled','ready'].includes(plot.fieldState))
@@ -1155,7 +1278,7 @@ export class FarmUI {
       </div>`;
     } else if (plot.fieldState === 'being_tilled' || plot.fieldState === 'being_planted' || plot.fieldState === 'being_harvested') {
       const actionProg = plot.actionDurationTicks > 0
-        ? Math.min(1, (this.state.tick - plot.actionStartTick) / plot.actionDurationTicks) : 0;
+        ? Math.min(1, (this.displayTick() - plot.actionStartTick) / plot.actionDurationTicks) : 0;
       const remSec = Math.max(0, Math.ceil((1 - actionProg) * plot.actionDurationTicks));
       const [icon, label, color] = plot.fieldState === 'being_tilled'
         ? ['🚜', 'Pflügen…', '#c47a30']
@@ -1167,7 +1290,7 @@ export class FarmUI {
         <span class="fc-action-label">${label}</span>
         <div class="fc-progress-wrap">
           <div class="fc-progress-bar"><div class="fc-progress-fill" style="width:${actionProg*100}%;background:${color}"></div></div>
-          <span class="fc-time-remain">${remSec}s</span>
+          <span class="fc-time-remain">${this.formatDuration(remSec)}</span>
         </div>
       </div>`;
     } else if (plot.fieldState === 'tilled') {
@@ -1177,7 +1300,7 @@ export class FarmUI {
     } else if (plot.fieldState === 'planted' && crop) {
       const stage = prog < 0.33 ? '🌱' : prog < 0.66 ? '🌿' : crop.emoji;
       const rem   = Math.ceil((1-prog) * plot.growthTicks);
-      const remStr = rem >= 60 ? `${Math.ceil(rem/60)} min` : `${rem} s`;
+      const remStr = this.formatDuration(rem);
       body = `<div class="fc-body fc-body-planted">
         <span class="fc-crop-emoji">${stage}</span>
         <div class="fc-progress-wrap">
@@ -1191,7 +1314,7 @@ export class FarmUI {
       body = `<div class="fc-body fc-body-ready">
         <span class="fc-crop-emoji fc-ready-pulse">${crop.emoji}</span>
         <span class="fc-yield-amount">${kgStr}</span>
-        <span class="fc-yield-value">≈ ${Math.round(crop.yieldKg * crop.sellPricePerKg).toLocaleString('de-DE')} €</span>
+        <span class="fc-yield-value">≈ ${Math.round(crop.yieldKg * currentPrice(this.state, crop.id)).toLocaleString('de-DE')} €</span>
       </div>`;
     }
 
@@ -1206,10 +1329,9 @@ export class FarmUI {
 
     card.innerHTML = `<div class="fc-header"><span class="fc-num">Feld ${plot.id + 1}</span>${stateTag}</div>${body}`;
 
-    card.querySelector('[data-demolish]')?.addEventListener('click', e => {
+    card.querySelector('[data-demolish]')?.addEventListener('click', async e => {
       e.stopPropagation();
-      this.state = demolishPlot(this.state, this.state.activeFarmId, plot.id);
-      this.onStateChange(this.state);
+      await this.dispatch('demolishPlot', [this.state.activeFarmId, plot.id]);
       this.renderFarmArea(); this.renderHUD();
     });
 
@@ -1245,10 +1367,10 @@ export class FarmUI {
       const buyCost   = getBuyCost(slot.animalId, plot.stallSize);
       const breedCyc  = getBreedingCycle(slot.animalId, plot.stallSize);
       const yield_    = computeYield(slot.animalId, count, plot.stallSize);
-      const val       = Math.round(yield_ * animal.sellPricePerUnit);
+      const val       = Math.round(yield_ * currentPrice(this.state, animal.productId));
       const canBuy    = count < max && this.state.money >= buyCost;
-      const prog      = slotProgress(slot, this.state.tick);
-      const breedProg = slotBreedProgress(slot, plot.stallSize, this.state.tick);
+      const prog      = slotProgress(slot, this.displayTick());
+      const breedProg = slotBreedProgress(slot, plot.stallSize, this.displayTick());
       const breedSec  = count < max ? Math.ceil((1 - breedProg) * breedCyc) : 0;
       const sid       = `s${plot.id}-${slotIdx}`;
 
@@ -1308,28 +1430,24 @@ export class FarmUI {
       ${bodyHTML}`;
 
     // Wire up buttons
-    card.querySelector(`#s${plot.id}-0-buy`)?.addEventListener('click', e => {
+    card.querySelector(`#s${plot.id}-0-buy`)?.addEventListener('click', async e => {
       e.stopPropagation();
-      this.state = buyAnimal(this.state, farmId, plot.id, 0);
-      this.onStateChange(this.state);
+      await this.dispatch('buyAnimal', [farmId, plot.id, 0]);
       this.renderFarmArea(); this.renderHUD();
     });
-    card.querySelector(`#s${plot.id}-1-buy`)?.addEventListener('click', e => {
+    card.querySelector(`#s${plot.id}-1-buy`)?.addEventListener('click', async e => {
       e.stopPropagation();
-      this.state = buyAnimal(this.state, farmId, plot.id, 1);
-      this.onStateChange(this.state);
+      await this.dispatch('buyAnimal', [farmId, plot.id, 1]);
       this.renderFarmArea(); this.renderHUD();
     });
-    card.querySelector(`#s${plot.id}-0-collect`)?.addEventListener('click', e => {
+    card.querySelector(`#s${plot.id}-0-collect`)?.addEventListener('click', async e => {
       e.stopPropagation();
-      this.state = collectStall(this.state, farmId, plot.id, 0);
-      this.onStateChange(this.state);
+      await this.dispatch('collectStall', [farmId, plot.id, 0]);
       this.renderFarmArea(); this.renderInfoSidebar(); this.renderHUD(); this.renderNav();
     });
-    card.querySelector(`#s${plot.id}-1-collect`)?.addEventListener('click', e => {
+    card.querySelector(`#s${plot.id}-1-collect`)?.addEventListener('click', async e => {
       e.stopPropagation();
-      this.state = collectStall(this.state, farmId, plot.id, 1);
-      this.onStateChange(this.state);
+      await this.dispatch('collectStall', [farmId, plot.id, 1]);
       this.renderFarmArea(); this.renderInfoSidebar(); this.renderHUD(); this.renderNav();
     });
     card.querySelector(`[data-add-slot]`)?.addEventListener('click', e => {
@@ -1414,13 +1532,12 @@ export class FarmUI {
     }
   }
 
-  private handleNewLocation(): void {
+  private async handleNewLocation(): Promise<void> {
     if (!this.selectedLocation) return;
     const nameInput = document.getElementById('new-loc-name') as HTMLInputElement;
     const { city, lat, lon } = this.selectedLocation;
     const farmName = nameInput.value.trim() || `Gut ${city}`;
-    this.state = openNewFarm(this.state, city, farmName, lat, lon, NEW_LOCATION_COST);
-    this.onStateChange(this.state);
+    await this.dispatch('openNewFarm', [city, farmName, lat, lon, NEW_LOCATION_COST]);
     this.selectedLocation = null;
     this.closeModals();
     this.currentView = 'farm';
@@ -1453,12 +1570,11 @@ export class FarmUI {
 
     modal.classList.remove('hidden');
     el.querySelectorAll('[data-animal]').forEach(btn => {
-      btn.addEventListener('click', () => {
+      btn.addEventListener('click', async () => {
         const animalId = (btn as HTMLElement).dataset.animal!;
         const pId      = parseInt((btn as HTMLElement).dataset.plot!);
         this.closeModals();
-        this.state = buildSecondHalfStall(this.state, this.state.activeFarmId, pId, animalId);
-        this.onStateChange(this.state);
+        await this.dispatch('buildSecondHalfStall', [this.state.activeFarmId, pId, animalId]);
         this.renderFarmArea(); this.renderHUD(); this.renderInfoSidebar();
       });
     });
@@ -1476,7 +1592,7 @@ export class FarmUI {
       const b       = PROCESSING_BUILDINGS[slot.buildingId];
       if (!b) return '';
       const outProd = PRODUCTS[b.outputProductId];
-      const prog    = procProgress(slot, this.state.tick);
+      const prog    = procProgress(slot, this.displayTick());
       const remSec  = slot.isProcessing ? Math.ceil((1 - prog) * b.cycleSeconds) : 0;
       const sid     = `proc-${plot.id}-${idx}`;
 
@@ -1519,7 +1635,7 @@ export class FarmUI {
           ${slot.isProcessing ? `
             <div class="fc-progress-wrap">
               <div class="fc-progress-bar"><div class="fc-progress-fill" style="width:${prog*100}%;background:#e05555"></div></div>
-              <span class="fc-time-remain">${remSec}s · ${activeOutProd?.emoji ?? ''} ${pendingKg} ${activeOutProd?.unit ?? 'kg'}</span>
+              <span class="fc-time-remain">${this.formatDuration(remSec)} · ${activeOutProd?.emoji ?? ''} ${pendingKg} ${activeOutProd?.unit ?? 'kg'}</span>
             </div>` : ''}
           ${slot.outputReady > 0 ? `
             <div class="proc-output-row">
@@ -1548,7 +1664,7 @@ export class FarmUI {
         ${slot.isProcessing ? `
           <div class="fc-progress-wrap">
             <div class="fc-progress-bar"><div class="fc-progress-fill" style="width:${prog*100}%;background:#9b7cff"></div></div>
-            <span class="fc-time-remain">${remSec}s · ${outProd?.emoji ?? ''} ${b.outputAmount} ${outProd?.unit ?? ''}</span>
+            <span class="fc-time-remain">${this.formatDuration(remSec)} · ${outProd?.emoji ?? ''} ${b.outputAmount} ${outProd?.unit ?? ''}</span>
           </div>` : ''}
         ${slot.outputReady > 0 ? `
           <div class="proc-output-row">
@@ -1586,35 +1702,30 @@ export class FarmUI {
     // Wire buttons
     plot.processingSlots.forEach((slot, idx) => {
       const sid = `proc-${plot.id}-${idx}`;
-      card.querySelector(`#${sid}-load`)?.addEventListener('click', e => {
+      card.querySelector(`#${sid}-load`)?.addEventListener('click', async e => {
         e.stopPropagation();
-        this.state = loadProcessing(this.state, farmId, plot.id, idx);
-        this.onStateChange(this.state);
+        await this.dispatch('loadProcessing', [farmId, plot.id, idx]);
         this.renderFarmArea(); this.renderHUD();
       });
-      card.querySelector(`#${sid}-collect`)?.addEventListener('click', e => {
+      card.querySelector(`#${sid}-collect`)?.addEventListener('click', async e => {
         e.stopPropagation();
-        this.state = collectProcessingOutput(this.state, farmId, plot.id, idx);
-        this.onStateChange(this.state);
+        await this.dispatch('collectProcessingOutput', [farmId, plot.id, idx]);
         this.renderFarmArea(); this.renderInfoSidebar(); this.renderHUD(); this.renderNav();
       });
-      card.querySelector(`#${sid}-minus`)?.addEventListener('click', e => {
+      card.querySelector(`#${sid}-minus`)?.addEventListener('click', async e => {
         e.stopPropagation();
-        this.state = setSlaughterTarget(this.state, farmId, plot.id, idx, (slot.slaughterTarget ?? 1) - 1);
-        this.onStateChange(this.state);
+        await this.dispatch('setSlaughterTarget', [farmId, plot.id, idx, (slot.slaughterTarget ?? 1) - 1]);
         this.renderFarmArea();
       });
-      card.querySelector(`#${sid}-plus`)?.addEventListener('click', e => {
+      card.querySelector(`#${sid}-plus`)?.addEventListener('click', async e => {
         e.stopPropagation();
-        this.state = setSlaughterTarget(this.state, farmId, plot.id, idx, (slot.slaughterTarget ?? 1) + 1);
-        this.onStateChange(this.state);
+        await this.dispatch('setSlaughterTarget', [farmId, plot.id, idx, (slot.slaughterTarget ?? 1) + 1]);
         this.renderFarmArea();
       });
       ANIMAL_LIST.forEach(a => {
-        card.querySelector(`#${sid}-animal-${a.id}`)?.addEventListener('click', e => {
+        card.querySelector(`#${sid}-animal-${a.id}`)?.addEventListener('click', async e => {
           e.stopPropagation();
-          this.state = setSlaughterAnimal(this.state, farmId, plot.id, idx, a.id);
-          this.onStateChange(this.state);
+          await this.dispatch('setSlaughterAnimal', [farmId, plot.id, idx, a.id]);
           this.renderFarmArea();
         });
       });
@@ -1691,11 +1802,10 @@ export class FarmUI {
     document.getElementById('processing-builder')!.classList.remove('hidden');
 
     listEl.querySelectorAll('[data-building]').forEach(btn => {
-      btn.addEventListener('click', () => {
+      btn.addEventListener('click', async () => {
         const buildingId = (btn as HTMLElement).dataset.building!;
         this.closeModals();
-        this.state = buildProcessingBuilding(this.state, this.state.activeFarmId, plotId, buildingId);
-        this.onStateChange(this.state);
+        await this.dispatch('buildProcessingBuilding', [this.state.activeFarmId, plotId, buildingId]);
         this.renderFarmArea(); this.renderHUD(); this.renderInfoSidebar(); this.renderNav();
       });
     });
@@ -1703,7 +1813,7 @@ export class FarmUI {
 
   // ── Click handling ────────────────────────────────────────────────────────
 
-  private handlePlotClick(plotId: number): void {
+  private async handlePlotClick(plotId: number): Promise<void> {
     const farmId = this.state.activeFarmId;
     const plot   = this.state.farms[farmId]?.plots.find(p => p.id === plotId);
     if (!plot || plot.locked) return;
@@ -1712,14 +1822,12 @@ export class FarmUI {
       if (plot.fieldState === 'empty') {
         this.openPlotUsePicker(plotId);
       } else if (plot.fieldState === 'fallow') {
-        this.state = tillPlot(this.state, farmId, plotId);
-        this.onStateChange(this.state);
+        await this.dispatch('tillPlot', [farmId, plotId]);
         this.renderFarmArea(); this.renderHUD();
       } else if (plot.fieldState === 'tilled') {
         this.openCropPicker(plotId);
       } else if (plot.fieldState === 'ready') {
-        this.state = harvestPlot(this.state, farmId, plotId);
-        this.onStateChange(this.state);
+        await this.dispatch('harvestPlot', [farmId, plotId]);
         this.renderFarmArea(); this.renderHUD(); this.renderInfoSidebar(); this.renderNav();
       }
     }
@@ -1754,10 +1862,9 @@ export class FarmUI {
 
     modal.classList.remove('hidden');
 
-    document.getElementById('pup-field')!.addEventListener('click', () => {
+    document.getElementById('pup-field')!.addEventListener('click', async () => {
       this.closeModals();
-      this.state = designateField(this.state, this.state.activeFarmId, plotId);
-      this.onStateChange(this.state);
+      await this.dispatch('designateField', [this.state.activeFarmId, plotId]);
       this.renderFarmArea(); this.renderHUD();
     });
     document.getElementById('pup-stall')!.addEventListener('click', () => {
@@ -1810,12 +1917,11 @@ export class FarmUI {
     modal.classList.remove('hidden');
 
     el.querySelectorAll('[data-animal]').forEach(btn => {
-      btn.addEventListener('click', () => {
+      btn.addEventListener('click', async () => {
         const animalId = (btn as HTMLElement).dataset.animal!;
         const size     = (btn as HTMLElement).dataset.size as StallSize;
         this.closeModals();
-        this.state = buildStall(this.state, this.state.activeFarmId, plotId, animalId, size);
-        this.onStateChange(this.state);
+        await this.dispatch('buildStall', [this.state.activeFarmId, plotId, animalId, size]);
         this.renderFarmArea(); this.renderHUD(); this.renderInfoSidebar(); this.renderNav();
       });
     });
@@ -1830,8 +1936,9 @@ export class FarmUI {
     listEl.innerHTML = '';
     CROP_LIST.forEach(crop => {
       const canAfford = this.state.money >= crop.seedCost;
-      const profit = Math.round(crop.yieldKg * crop.sellPricePerKg) - crop.seedCost;
-      const minStr = Math.ceil(crop.growthTicks / 60) + ' min';
+      const price = currentPrice(this.state, crop.id);
+      const profit = Math.round(crop.yieldKg * price) - crop.seedCost;
+      const minStr = this.formatDuration(crop.growthTicks);
       const yieldStr = crop.yieldKg >= 1000 ? (crop.yieldKg/1000).toFixed(1)+'t' : crop.yieldKg+'kg';
       const btn = document.createElement('button');
       btn.className = `crop-option${canAfford ? '' : ' crop-option-disabled'}`;
@@ -1843,14 +1950,13 @@ export class FarmUI {
           <div class="crop-option-meta">
             <span class="cost">🪙 ${crop.seedCost} €</span>
             <span class="yield">📦 ${yieldStr}</span>
-            <span class="sell">💵 ${crop.sellPricePerKg.toFixed(2).replace('.',',')} €/kg</span>
+            <span class="sell">💵 ${price.toFixed(2).replace('.',',')} €/kg</span>
             <span class="profit">📈 +${profit.toLocaleString('de-DE')} €</span>
             <span class="time">⏱ ${minStr}</span>
           </div>
         </div>`;
-      if (canAfford) btn.addEventListener('click', () => {
-        this.state = plantCrop(this.state, this.state.activeFarmId, plotId, crop.id);
-        this.onStateChange(this.state);
+      if (canAfford) btn.addEventListener('click', async () => {
+        await this.dispatch('plantCrop', [this.state.activeFarmId, plotId, crop.id]);
         this.closeModals();
         this.renderFarmArea(); this.renderHUD(); this.renderInfoSidebar(); this.renderNav();
       });
@@ -1865,6 +1971,519 @@ export class FarmUI {
     this.pendingPlotId = null;
   }
 
+  // ── Kurse ────────────────────────────────────────────────────────────────
+
+  private renderPricesView(): void {
+    const el = document.getElementById('farm-area');
+    if (!el) return;
+
+    const cropIds = new Set(CROP_LIST.map(c => c.id));
+    const animalProductIds = new Set<string>();
+    ANIMAL_LIST.forEach(a => {
+      animalProductIds.add(a.productId);
+      if (a.slaughterProductId) animalProductIds.add(a.slaughterProductId);
+    });
+    const groups: Array<{ label: string; ids: string[] }> = [
+      { label: '🌾 Feldfrüchte',  ids: CROP_LIST.map(c => c.id) },
+      { label: '🐄 Tierprodukte', ids: [...animalProductIds] },
+      { label: '🏭 Verarbeitet',  ids: Object.keys(PRODUCTS).filter(id => !cropIds.has(id) && !animalProductIds.has(id)) },
+    ];
+
+    if (!PRODUCTS[this.priceViewProductId]) this.priceViewProductId = CROP_LIST[0].id;
+    const prod    = PRODUCTS[this.priceViewProductId];
+    const base    = prod.sellPricePerUnit;
+    const history = this.state.priceHistory[this.priceViewProductId] ?? [base];
+    const current = currentPrice(this.state, this.priceViewProductId);
+    const prev    = history.length > 1 ? history[history.length - 2] : current;
+    const changePct  = prev ? ((current - prev) / prev) * 100 : 0;
+    const vsBasePct  = base ? ((current - base) / base) * 100 : 0;
+    const trendUp    = changePct >= 0;
+    const seasonFactor = seasonalPriceFactor(this.priceViewProductId, this.state.day);
+    const seasonHint = seasonFactor === null ? '' : seasonFactor < 0.98
+      ? '<span class="text-success">🌱 Erntesaison — aktuell tendenziell günstiger</span>'
+      : seasonFactor > 1.02
+        ? '<span class="text-danger">❄️ Nebensaison — aktuell tendenziell teurer</span>'
+        : '<span class="text-muted">Saisonaler Übergang — kein starker Trend</span>';
+
+    const productBtns = (ids: string[]) => ids.map(id => {
+      const p     = PRODUCTS[id];
+      const price = currentPrice(this.state, id);
+      const active = id === this.priceViewProductId;
+      return `<button class="price-product-btn ${active ? 'price-product-btn-active' : ''}" data-price-product="${id}">
+        <span class="price-product-emoji">${p.emoji}</span>
+        <span class="price-product-name">${p.name}</span>
+        <span class="price-product-val">${price.toFixed(2).replace('.', ',')} €</span>
+      </button>`;
+    }).join('');
+
+    el.innerHTML = `
+      <div class="farm-header">
+        <div class="farm-breadcrumb">
+          <span class="breadcrumb-section">📊 Kurse</span>
+        </div>
+      </div>
+      <div class="prices-layout">
+        <div class="prices-sidebar-list">
+          ${groups.map(g => `
+            <div class="price-group">
+              <div class="price-group-title">${g.label}</div>
+              ${productBtns(g.ids)}
+            </div>`).join('')}
+        </div>
+        <div class="prices-chart-panel market-section-card">
+          <div class="prices-chart-header">
+            <div class="prices-chart-title">${prod.emoji} ${prod.name}</div>
+            <div class="prices-chart-price">${current.toFixed(2).replace('.', ',')} € <span class="text-muted">/ ${prod.unit}</span></div>
+            <div class="prices-chart-change ${trendUp ? 'text-success' : 'text-danger'}">
+              ${trendUp ? '▲' : '▼'} ${Math.abs(changePct).toFixed(1)}% ggü. Vortag
+            </div>
+            <div class="prices-chart-base text-muted">
+              Basispreis ${base.toFixed(2).replace('.', ',')} € · ${vsBasePct >= 0 ? '+' : ''}${vsBasePct.toFixed(1)}% vs. Basis
+            </div>
+            ${seasonHint ? `<div class="prices-chart-season">${seasonHint}</div>` : ''}
+          </div>
+          ${this.buildPriceChartSvg(history, base)}
+          <div class="prices-chart-days text-muted">Letzte ${history.length} von max. ${PRICE_HISTORY_DAYS} Tagen</div>
+        </div>
+      </div>`;
+
+    el.querySelectorAll('[data-price-product]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        this.priceViewProductId = (btn as HTMLElement).dataset.priceProduct!;
+        this.renderPricesView();
+      });
+    });
+  }
+
+  private buildPriceChartSvg(history: number[], base: number): string {
+    const w = 640, h = 220, pad = 28;
+    // Bei nur einem Kurstag (Tag 1) eine flache Linie zeichnen statt eines irreführenden Dreiecks
+    const values = history.length > 1 ? history : [history[0] ?? base, history[0] ?? base];
+    const min = Math.min(...values, base) * 0.97;
+    const max = Math.max(...values, base) * 1.03;
+    const range = (max - min) || 1;
+    const stepX = values.length > 1 ? (w - pad * 2) / (values.length - 1) : 0;
+    const toXY = (v: number, i: number): [number, number] => [
+      pad + i * stepX,
+      h - pad - ((v - min) / range) * (h - pad * 2),
+    ];
+    const points = values.map((v, i) => toXY(v, i));
+    const baseY  = toXY(base, 0)[1];
+    const trendUp = values[values.length - 1] >= values[0];
+    const trendCls = trendUp ? 'up' : 'down';
+    const pointsStr = points.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(' ');
+    const areaStr   = `${pad},${h - pad} ${pointsStr} ${w - pad},${h - pad}`;
+    const [lastX, lastY] = points[points.length - 1];
+
+    return `<svg class="price-chart-svg" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
+      <line x1="${pad}" y1="${baseY.toFixed(1)}" x2="${w - pad}" y2="${baseY.toFixed(1)}"
+        class="price-chart-baseline" />
+      <polygon class="price-chart-area price-chart-area-${trendCls}" points="${areaStr}" />
+      <polyline class="price-chart-line price-chart-line-${trendCls}" points="${pointsStr}" />
+      <circle class="price-chart-dot price-chart-line-${trendCls}" cx="${lastX.toFixed(1)}" cy="${lastY.toFixed(1)}" r="4" />
+    </svg>`;
+  }
+
+  // ── Logistik ─────────────────────────────────────────────────────────────
+
+  private formatDuration(ticks: number): string {
+    const sec = Math.max(0, Math.round(ticks));
+    if (sec < 60) return `${sec}s`;
+    const totalMin = Math.floor(sec / 60);
+    if (totalMin < 60) return `${totalMin} Min`;
+    const totalH = Math.floor(totalMin / 60);
+    const m = totalMin % 60;
+    if (totalH < 24) return m > 0 ? `${totalH}h ${m}min` : `${totalH}h`;
+    const d = Math.floor(totalH / 24);
+    const h = totalH % 24;
+    return [`${d}d`, h > 0 ? `${h}h` : '', m > 0 ? `${m}min` : ''].filter(Boolean).join(' ');
+  }
+
+  private renderLogisticsView(): void {
+    const el = document.getElementById('farm-area');
+    if (!el) return;
+    const farms = this.state.farmMeta.filter(m => m.unlocked);
+
+    if (farms.length < 2) {
+      el.innerHTML = `
+        <div class="farm-header">
+          <div class="farm-breadcrumb"><span class="breadcrumb-section">🚛 Logistik</span></div>
+        </div>
+        <div class="market-section-card">
+          <p class="text-muted" style="text-align:center;padding:24px 0">
+            Du brauchst mindestens 2 Standorte, um Ware per LKW zu verschicken.
+          </p>
+        </div>`;
+      return;
+    }
+
+    if (!this.deliveryFromFarmId || !farms.some(m => m.id === this.deliveryFromFarmId)) {
+      this.deliveryFromFarmId = this.state.activeFarmId;
+    }
+    const fromMeta = farms.find(m => m.id === this.deliveryFromFarmId) ?? farms[0];
+    const otherFarms = farms.filter(m => m.id !== fromMeta.id);
+    if (!this.deliveryToFarmId || !otherFarms.some(m => m.id === this.deliveryToFarmId)) {
+      this.deliveryToFarmId = otherFarms[0].id;
+    }
+    const toMeta = otherFarms.find(m => m.id === this.deliveryToFarmId)!;
+
+    const fromFarm = this.state.farms[fromMeta.id];
+    const storageEntries = fromFarm ? Object.entries(fromFarm.storage).filter(([, v]) => v > 0) : [];
+    if (!this.deliveryProductId || !storageEntries.some(([pid]) => pid === this.deliveryProductId)) {
+      this.deliveryProductId = storageEntries[0]?.[0] ?? null;
+    }
+
+    const truck  = findFreeTransporter(this.state, fromMeta.id);
+    const driver = findFreeEmployee(this.state, fromMeta.id, 'driver');
+    const ownsAnyTransporter = this.state.vehicles.some(v => v.defId === 'transporter');
+    const ownsAnyDriver      = this.state.employees.some(e => e.role === 'driver');
+    const available = this.deliveryProductId ? (fromFarm?.storage[this.deliveryProductId] ?? 0) : 0;
+    const maxAmount = Math.min(available, TRANSPORT_CAPACITY);
+
+    const km = distanceKm(fromMeta.lat, fromMeta.lon, toMeta.lat, toMeta.lon);
+    const etaTicks = transportDurationTicks(km);
+    const canStart = !!this.deliveryProductId && !!truck && !!driver && maxAmount > 0;
+
+    const farmOptions = (excludeId: string | undefined, selectedId: string | null) => farms
+      .filter(m => m.id !== excludeId)
+      .map(m => `<option value="${m.id}" ${m.id === selectedId ? 'selected' : ''}>${m.name} · ${m.city}</option>`).join('');
+
+    const productOptions = storageEntries.map(([pid, amt]) => {
+      const p = PRODUCTS[pid];
+      return `<option value="${pid}" ${pid === this.deliveryProductId ? 'selected' : ''}>${p?.emoji ?? ''} ${p?.name ?? pid} (${formatAmount(amt, p?.unit ?? '')} verfügbar)</option>`;
+    }).join('');
+
+    const deliveryRows = this.state.deliveries.map(d => {
+      const dFrom = this.state.farmMeta.find(m => m.id === d.fromFarmId);
+      const dTo   = this.state.farmMeta.find(m => m.id === d.toFarmId);
+      const prod  = PRODUCTS[d.productId];
+      const total = d.arriveTick - d.departTick;
+      const progress = total > 0 ? Math.min(1, Math.max(0, (this.displayTick() - d.departTick) / total)) : 1;
+      const remaining = d.arriveTick - this.displayTick();
+      return `<div class="order-row">
+        <div class="order-row-left">
+          <span class="order-prod">${prod?.emoji ?? '🚛'} ${formatAmount(d.amount, prod?.unit ?? '')} ${prod?.name ?? d.productId}</span>
+          <span class="order-meta">${dFrom?.city ?? '?'} → ${dTo?.city ?? '?'}</span>
+        </div>
+        <div class="order-row-right">
+          <span class="order-amt">${this.formatDuration(remaining)}</span>
+          <div class="order-progress-bar"><div class="order-progress-fill" style="width:${(progress * 100).toFixed(0)}%"></div></div>
+        </div>
+      </div>`;
+    }).join('');
+
+    el.innerHTML = `
+      <div class="farm-header">
+        <div class="farm-breadcrumb"><span class="breadcrumb-section">🚛 Logistik</span></div>
+      </div>
+      <div class="market-layout">
+        <div class="market-section-card">
+          <div class="market-section-title">Neue Lieferung</div>
+          ${!ownsAnyTransporter ? `
+            <p class="text-muted" style="margin-bottom:4px">
+              Du besitzt noch keinen Transporter. <a class="fleet-shop-link" id="logi-shop-link" href="#">Im Fahrzeug-Shop kaufen</a> (28.000 €).
+            </p>` : ''}
+          ${!ownsAnyDriver ? `
+            <p class="text-muted" style="margin-bottom:8px">
+              Du hast noch keinen LKW-Fahrer. <a class="fleet-shop-link" id="logi-hire-link" href="#">Im Personal-Menü einstellen</a> (500 €).
+            </p>` : ''}
+          <div class="order-new-form">
+            <select class="order-select" id="logi-from">${farmOptions(undefined, fromMeta.id)}</select>
+            <select class="order-select" id="logi-to">${farmOptions(fromMeta.id, toMeta.id)}</select>
+            ${storageEntries.length === 0
+              ? '<p class="text-muted" style="font-size:12px">Kein Lagerbestand am Ausgangsstandort.</p>'
+              : `<select class="order-select" id="logi-product">${productOptions}</select>
+                 <div class="order-amount-row">
+                   <input class="order-amount-input" id="logi-amount" type="number" min="1" max="${maxAmount}" value="${maxAmount}" />
+                   <span class="order-amount-avail">max. ${formatAmount(maxAmount, PRODUCTS[this.deliveryProductId ?? '']?.unit ?? '')}</span>
+                 </div>`}
+            <p class="text-muted" style="font-size:11px">
+              📍 ${Math.round(km)} km Luftlinie · ⏱ ca. ${this.formatDuration(etaTicks)} Fahrzeit
+              ${truck ? '' : ' · <span class="text-danger">kein freier Transporter am Ausgangsstandort</span>'}
+              ${driver ? '' : ' · <span class="text-danger">kein freier LKW-Fahrer am Ausgangsstandort</span>'}
+            </p>
+            <button class="btn btn-primary" id="logi-start-btn" ${canStart ? '' : 'disabled'}>Lieferung starten</button>
+          </div>
+        </div>
+        <div class="market-section-card">
+          <div class="market-section-title">Unterwegs (${this.state.deliveries.length})</div>
+          ${deliveryRows || '<p class="text-muted" style="text-align:center;padding:16px 0">Keine aktiven Lieferungen</p>'}
+        </div>
+      </div>`;
+
+    document.getElementById('logi-shop-link')?.addEventListener('click', e => {
+      e.preventDefault(); this.currentView = 'vehicles'; this.render(this.state);
+    });
+    document.getElementById('logi-hire-link')?.addEventListener('click', e => {
+      e.preventDefault(); this.currentView = 'employees'; this.render(this.state);
+    });
+    document.getElementById('logi-from')?.addEventListener('change', e => {
+      this.deliveryFromFarmId = (e.target as HTMLSelectElement).value;
+      this.deliveryToFarmId = null;
+      this.deliveryProductId = null;
+      this.renderLogisticsView();
+    });
+    document.getElementById('logi-to')?.addEventListener('change', e => {
+      this.deliveryToFarmId = (e.target as HTMLSelectElement).value;
+      this.renderLogisticsView();
+    });
+    document.getElementById('logi-product')?.addEventListener('change', e => {
+      this.deliveryProductId = (e.target as HTMLSelectElement).value;
+      this.renderLogisticsView();
+    });
+    document.getElementById('logi-start-btn')?.addEventListener('click', async () => {
+      if (!this.deliveryProductId) return;
+      const amountInp = document.getElementById('logi-amount') as HTMLInputElement | null;
+      const amount = Math.min(Number(amountInp?.value) || 0, maxAmount);
+      await this.dispatch('startDelivery', [fromMeta.id, toMeta.id, this.deliveryProductId, amount]);
+      this.renderHUD(); this.renderNav();
+      this.renderLogisticsView();
+    });
+  }
+
+  // ── Mitarbeiter ──────────────────────────────────────────────────────────
+
+  private renderEmployeesView(): void {
+    const el = document.getElementById('farm-area');
+    if (!el) return;
+    const farms = this.state.farmMeta.filter(m => m.unlocked);
+
+    const byFarm = farms.map(meta => ({
+      meta,
+      emps: this.state.employees.filter(e => e.farmId === meta.id),
+    })).filter(g => g.emps.length > 0);
+
+    const overviewHTML = byFarm.length === 0
+      ? '<p class="text-muted" style="padding:4px 0">Noch niemand eingestellt.</p>'
+      : byFarm.map(({ meta, emps }) => `
+          <div class="fleet-overview-row">
+            <span class="fleet-farm-name">📍 ${meta.city}</span>
+            <span class="fleet-tags">
+              ${emps.map(e => `<span class="fleet-tag">${EMPLOYEE_ROLES[e.role].emoji} ${EMPLOYEE_ROLES[e.role].name}</span>`).join('')}
+            </span>
+          </div>`).join('');
+
+    const relocateSelect = (uid: number, currentFarmId: string) =>
+      farms.length > 1
+        ? `<select class="fleet-card-relocate" data-employee-uid="${uid}">
+            ${farms.map(m => `<option value="${m.id}" ${m.id === currentFarmId ? 'selected' : ''}>${m.city}</option>`).join('')}
+          </select>`
+        : '';
+
+    const employeeRows = this.state.employees.map(e => {
+      const def  = EMPLOYEE_ROLES[e.role];
+      const meta = this.state.farmMeta.find(m => m.id === e.farmId);
+      const free = e.inUseUntilTick <= this.displayTick();
+      return `<div class="farm-fleet-card">
+        <span class="fleet-card-emoji">${def.emoji}</span>
+        <div class="fleet-card-info">
+          <span class="fleet-card-name">${def.name} · ${meta?.city ?? '?'}</span>
+          <span class="fleet-card-tasks">${def.wagePerDay.toLocaleString('de-DE')} €/Tag Lohn</span>
+        </div>
+        <span class="fleet-status ${free ? 'fleet-status-free' : 'fleet-status-busy'}">${free ? 'Frei' : 'Belegt'}</span>
+        ${relocateSelect(e.uid, e.farmId)}
+        <button class="btn-icon-sm emp-fire-btn" data-employee-fire="${e.uid}" title="Kündigen">✕</button>
+      </div>`;
+    }).join('');
+
+    const roleCards = EMPLOYEE_ROLE_LIST.map(def => {
+      const canAfford = this.state.money >= def.hireCost;
+      const farmOptions = farms.map(m => `<option value="${m.id}">${m.name} · ${m.city}</option>`).join('');
+      return `<div class="vshop-card ${canAfford ? '' : 'vshop-card-locked'}">
+        <div class="vshop-emoji">${def.emoji}</div>
+        <div class="vshop-info">
+          <div class="vshop-name">${def.name}</div>
+          <div class="vshop-desc">${def.description}</div>
+          <div class="vshop-tasks"><span class="vshop-task">${def.wagePerDay.toLocaleString('de-DE')} €/Tag Lohn</span></div>
+          <select class="order-select emp-hire-farm" data-hire-farm-for="${def.id}">${farmOptions}</select>
+        </div>
+        <div class="vshop-right">
+          <div class="vshop-price">${def.hireCost.toLocaleString('de-DE')} €</div>
+          <button class="btn btn-primary vshop-buy-btn ${canAfford ? '' : 'disabled'}"
+            data-hire-role="${def.id}" ${canAfford ? '' : 'disabled'}>Einstellen</button>
+        </div>
+      </div>`;
+    }).join('');
+
+    const payroll = dailyPayroll(this.state.employees);
+    const payrollTight = payroll > 0 && this.state.money < payroll;
+
+    el.innerHTML = `
+      <div class="farm-header">
+        <div class="farm-breadcrumb">
+          <span class="breadcrumb-section">👥 Mitarbeiter</span>
+        </div>
+        <div class="farm-header-meta">
+          <span class="farm-field-count">${this.state.employees.length} angestellt</span>
+        </div>
+      </div>
+      <div class="vshop-layout">
+        <div class="panel vshop-fleet-panel">
+          <h4 class="panel-title">Dein Personal</h4>
+          ${payroll > 0 ? `<p class="${payrollTight ? 'text-danger' : 'text-muted'}" style="font-size:12px;margin-bottom:8px">
+            💰 Gesamt-Tageslohn: <strong>${payroll.toLocaleString('de-DE')} €</strong>/Tag
+            ${payrollTight ? ' · reicht dein Kontostand nicht, werden die teuersten Mitarbeiter automatisch gekündigt!' : ''}
+          </p>` : ''}
+          ${overviewHTML}
+          ${this.state.employees.length > 0 ? `<div class="farm-fleet-section" style="margin-top:12px">${employeeRows}</div>` : ''}
+        </div>
+        <div class="vshop-catalog">
+          <div class="vshop-section-label">👥 Einstellen</div>
+          ${roleCards}
+        </div>
+      </div>`;
+
+    el.querySelectorAll('[data-hire-role]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const role = (btn as HTMLElement).dataset.hireRole as EmployeeRole;
+        const sel = el.querySelector(`[data-hire-farm-for="${role}"]`) as HTMLSelectElement | null;
+        const farmId = sel?.value ?? farms[0]?.id;
+        if (!farmId) return;
+        await this.dispatch('hireEmployee', [farmId, role]);
+        this.renderHUD(); this.renderNav(); this.renderEmployeesView();
+      });
+    });
+    el.querySelectorAll('[data-employee-uid]').forEach(sel => {
+      sel.addEventListener('change', async () => {
+        const uid = parseInt((sel as HTMLSelectElement).dataset.employeeUid!);
+        await this.dispatch('moveEmployee', [uid, (sel as HTMLSelectElement).value]);
+        this.renderHUD(); this.renderNav(); this.renderEmployeesView();
+      });
+    });
+    el.querySelectorAll('[data-employee-fire]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const uid = parseInt((btn as HTMLElement).dataset.employeeFire!);
+        await this.dispatch('fireEmployee', [uid]);
+        this.renderHUD(); this.renderNav(); this.renderEmployeesView();
+      });
+    });
+  }
+
+  // ── Verarbeitung ─────────────────────────────────────────────────────────
+
+  private renderProcessingView(): void {
+    const el = document.getElementById('farm-area');
+    if (!el) return;
+    const farms = this.state.farmMeta.filter(m => m.unlocked);
+
+    const rows = farms.flatMap(meta => {
+      const farm = this.state.farms[meta.id];
+      if (!farm) return [];
+      return farm.plots
+        .filter(p => p.plotType === 'processing')
+        .flatMap(plot => plot.processingSlots.map((slot, slotIdx) => ({
+          farmId: meta.id, city: meta.city, plotId: plot.id, slotIdx, slot,
+          building: PROCESSING_BUILDINGS[slot.buildingId],
+        })))
+        .filter(r => !!r.building);
+    });
+
+    const readyCount = rows.filter(r => r.slot.outputReady > 0).length;
+
+    const rowHTML = rows.map(r => {
+      const { slot, building: b, farmId, plotId, slotIdx, city } = r;
+      const sid = `pv-${farmId}-${plotId}-${slotIdx}`;
+      const prog = procProgress(slot, this.displayTick());
+      const remSec = slot.isProcessing ? Math.ceil((1 - prog) * b.cycleSeconds) : 0;
+      const farm = this.state.farms[farmId];
+
+      let chainLabel: string;
+      let actionHTML: string;
+      if (b.inputFromStall) {
+        const animalId = slot.slaughterAnimalId ?? 'pig';
+        const animal   = ANIMALS[animalId];
+        let available = 0;
+        farm?.plots.forEach(p => {
+          if (p.plotType !== 'stall') return;
+          if (p.stallA.animalId === animalId) available += p.stallA.animalCount;
+          if (p.stallB?.animalId === animalId) available += p.stallB.animalCount;
+        });
+        const target  = slot.slaughterTarget ?? 1;
+        const outProd = PRODUCTS[animal?.slaughterProductId ?? ''];
+        chainLabel = `${animal?.emoji ?? '🐾'} ${target} Tier${target !== 1 ? 'e' : ''} → ${outProd?.emoji ?? ''} ${outProd?.name ?? ''}`;
+        const canStart = !slot.isProcessing && available >= 1;
+        actionHTML = slot.outputReady > 0
+          ? `<button class="proc-collect-btn" data-collect="${sid}">Einlagern (${slot.outputReady})</button>`
+          : !slot.isProcessing
+            ? `<button class="proc-load-btn ${canStart ? '' : 'proc-load-disabled'}" data-load="${sid}" ${canStart ? '' : 'disabled'}>🔪 Schlachten</button>`
+            : '';
+      } else {
+        const inProd  = PRODUCTS[b.inputProductId];
+        const outProd = PRODUCTS[b.outputProductId];
+        chainLabel = `${inProd?.emoji ?? ''} ${b.inputAmount} ${inProd?.unit ?? ''} → ${outProd?.emoji ?? ''} ${b.outputAmount} ${outProd?.unit ?? ''}`;
+        const stored  = farm?.storage[b.inputProductId] ?? 0;
+        const canLoad = !slot.isProcessing && stored >= b.inputAmount;
+        actionHTML = slot.outputReady > 0
+          ? `<button class="proc-collect-btn" data-collect="${sid}">Einlagern (${slot.outputReady})</button>`
+          : !slot.isProcessing
+            ? `<button class="proc-load-btn ${canLoad ? '' : 'proc-load-disabled'}" data-load="${sid}" ${canLoad ? '' : 'disabled'}>▶ Starten</button>`
+            : '';
+      }
+
+      const statusHTML = slot.outputReady > 0
+        ? `<span class="fleet-status fleet-status-free">Bereit</span>`
+        : slot.isProcessing
+          ? `<span class="fleet-status fleet-status-busy">${this.formatDuration(remSec)}</span>`
+          : `<span class="fleet-status fleet-status-free">Frei</span>`;
+
+      return `<div class="farm-fleet-card">
+        <span class="fleet-card-emoji">${b.emoji}</span>
+        <div class="fleet-card-info">
+          <span class="fleet-card-name">${b.name} · ${city}</span>
+          <span class="fleet-card-tasks">${chainLabel}</span>
+        </div>
+        ${statusHTML}
+        ${actionHTML}
+        <button class="btn-icon-sm" data-goto-farm="${farmId}" title="Zum Standort">↗</button>
+      </div>`;
+    }).join('');
+
+    el.innerHTML = `
+      <div class="farm-header">
+        <div class="farm-breadcrumb">
+          <span class="breadcrumb-section">⚙️ Verarbeitung</span>
+        </div>
+        <div class="farm-header-meta">
+          <span class="farm-field-count">${rows.length} Gebäude${readyCount > 0 ? ` · ${readyCount} bereit` : ''}</span>
+        </div>
+      </div>
+      <div class="market-section-card">
+        ${rows.length === 0
+          ? `<p class="text-muted" style="text-align:center;padding:24px 0">
+              Noch keine Verarbeitungsgebäude gebaut. Wähle auf einer freien Parzelle "Verarbeitung", um z.B. eine Mühle oder Käserei zu bauen.
+             </p>`
+          : `<div class="farm-fleet-section">${rowHTML}</div>`}
+      </div>`;
+
+    el.querySelectorAll('[data-load]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const sid = (btn as HTMLElement).dataset.load!;
+        const row = rows.find(r => `pv-${r.farmId}-${r.plotId}-${r.slotIdx}` === sid);
+        if (!row) return;
+        await this.dispatch('loadProcessing', [row.farmId, row.plotId, row.slotIdx]);
+        this.renderHUD(); this.renderProcessingView();
+      });
+    });
+    el.querySelectorAll('[data-collect]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const sid = (btn as HTMLElement).dataset.collect!;
+        const row = rows.find(r => `pv-${r.farmId}-${r.plotId}-${r.slotIdx}` === sid);
+        if (!row) return;
+        await this.dispatch('collectProcessingOutput', [row.farmId, row.plotId, row.slotIdx]);
+        this.renderHUD(); this.renderProcessingView();
+      });
+    });
+    el.querySelectorAll('[data-goto-farm]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const farmId = (btn as HTMLElement).dataset.gotoFarm!;
+        this.state = setActiveFarm(this.state, farmId);
+        this.onStateChange(this.state);
+        this.currentView = 'farm';
+        this.render(this.state);
+      });
+    });
+  }
+
   // ── Info Sidebar ──────────────────────────────────────────────────────────
 
   private renderInfoSidebar(): void {
@@ -1875,7 +2494,7 @@ export class FarmUI {
     if (!farm) { el.innerHTML = ''; return; }
 
     const storageEntries = Object.entries(farm.storage).filter(([,v]) => v > 0);
-    const totalVal       = totalStorageValue(farm.storage);
+    const totalVal       = totalStorageValue(farm.storage, this.state.marketPrices);
     const readyPlots     = farm.plots.filter(p => !p.locked &&
       ((p.plotType === 'field' && p.fieldState === 'ready') ||
        (p.plotType === 'stall' && (p.stallA.productionReady || (p.stallB?.productionReady ?? false))) ||
@@ -1905,47 +2524,73 @@ export class FarmUI {
           <button class="btn btn-harvest btn-full" id="harvest-all-btn">Alles einsammeln</button>`}
       </div>
       <div class="panel">
-        <h4 class="panel-title">📋 Pflanzen & Preise</h4>
-        ${CROP_LIST.map(c => {
-          const rev = Math.round(c.yieldKg * c.sellPricePerKg);
-          const yStr = c.yieldKg >= 1000 ? (c.yieldKg/1000).toFixed(1)+'t' : c.yieldKg+'kg';
-          return `<div class="crop-legend-row">
-            <span>${c.emoji}</span><span class="crop-legend-name">${c.name}</span>
-            <span class="text-muted">${yStr}</span>
-            <span class="crop-legend-rev">≈${rev} €</span>
-          </div>`;
-        }).join('')}
-      </div>
-      <div class="panel">
-        <h4 class="panel-title">🐄 Tierprodukte</h4>
-        ${ANIMAL_LIST.map(a => `<div class="crop-legend-row">
-          <span>${a.emoji}</span><span class="crop-legend-name">${a.name}</span>
-          <span class="text-muted">${a.productEmoji} ${a.sellPricePerUnit.toFixed(2).replace('.',',')} €/${a.productUnit}</span>
-        </div>`).join('')}
-      </div>
-      <div class="panel">
         <h4 class="panel-title">📊 Statistiken</h4>
         <div class="stat-row"><span>Einnahmen</span><strong>${this.state.stats.totalEarned.toLocaleString('de-DE')} €</strong></div>
         <div class="stat-row"><span>Geerntet</span><strong>${this.state.stats.totalHarvested}×</strong></div>
       </div>`;
 
-    document.getElementById('harvest-all-btn')?.addEventListener('click', () => {
-      let s = this.state;
-      readyPlots.forEach(p => {
-        if (p.plotType === 'field' && p.fieldState === 'ready') s = harvestPlot(s, farmId, p.id);
-        if (p.plotType === 'stall') {
-          if (p.stallA.productionReady) s = collectStall(s, farmId, p.id, 0);
-          if (p.stallB?.productionReady) s = collectStall(s, farmId, p.id, 1);
+    document.getElementById('harvest-all-btn')?.addEventListener('click', async () => {
+      // Jede Teilaktion ist ein eigener serverseitig validierter Dispatch — nacheinander
+      // (nicht parallel), damit z.B. "freier Mitarbeiter"-Prüfungen konsistent bleiben.
+      for (const p of readyPlots) {
+        if (p.plotType === 'field' && p.fieldState === 'ready') {
+          await this.dispatch('harvestPlot', [farmId, p.id]);
+        } else if (p.plotType === 'stall') {
+          if (p.stallA.productionReady) await this.dispatch('collectStall', [farmId, p.id, 0]);
+          if (p.stallB?.productionReady) await this.dispatch('collectStall', [farmId, p.id, 1]);
+        } else if (p.plotType === 'processing') {
+          for (let i = 0; i < p.processingSlots.length; i++) {
+            if (p.processingSlots[i].outputReady > 0) await this.dispatch('collectProcessingOutput', [farmId, p.id, i]);
+          }
         }
-        if (p.plotType === 'processing') {
-          p.processingSlots.forEach((slot, i) => {
-            if (slot.outputReady > 0) s = collectProcessingOutput(s, farmId, p.id, i);
-          });
-        }
-      });
-      this.state = s; this.onStateChange(s);
+      }
       this.renderFarmArea(); this.renderInfoSidebar(); this.renderHUD(); this.renderNav();
     });
+  }
+
+  showWelcomeBack(summary: WelcomeBackSummary): void {
+    const hasEvents = summary.fieldsHarvested > 0 || summary.stallCollectionsReady > 0
+      || summary.processingCompleted > 0 || summary.deliveriesArrived.length > 0
+      || summary.employeesFired.length > 0 || summary.wagesPaid > 0 || summary.topPriceMoves.length > 0;
+    if (!hasEvents) return;
+
+    const rows: string[] = [];
+    if (summary.fieldsHarvested > 0)
+      rows.push(`<div class="wb-row">🌾 <strong>${summary.fieldsHarvested}×</strong> Feld-Ernte abgeschlossen</div>`);
+    if (summary.stallCollectionsReady > 0)
+      rows.push(`<div class="wb-row">🐄 <strong>${summary.stallCollectionsReady}×</strong> Stall-Ertrag bereit zum Einsammeln</div>`);
+    if (summary.processingCompleted > 0)
+      rows.push(`<div class="wb-row">⚙️ <strong>${summary.processingCompleted}×</strong> Verarbeitung abgeschlossen</div>`);
+    summary.deliveriesArrived.forEach(d => {
+      const p    = PRODUCTS[d.productId];
+      const from = this.state.farmMeta.find(m => m.id === d.fromFarmId)?.city ?? d.fromFarmId;
+      const to   = this.state.farmMeta.find(m => m.id === d.toFarmId)?.city ?? d.toFarmId;
+      rows.push(`<div class="wb-row">🚛 ${formatAmount(d.amount, p?.unit ?? '')} ${p?.name ?? d.productId} · ${from} → ${to} angekommen</div>`);
+    });
+    if (summary.wagesPaid > 0)
+      rows.push(`<div class="wb-row">💰 <strong>${Math.round(summary.wagesPaid).toLocaleString('de-DE')} €</strong> Löhne ausgezahlt</div>`);
+    summary.employeesFired.forEach(f => {
+      const def = EMPLOYEE_ROLES[f.role];
+      rows.push(`<div class="wb-row text-danger">💸 ${def?.emoji ?? '👤'} ${def?.name ?? f.role} wegen unbezahlter Löhne gekündigt</div>`);
+    });
+    summary.topPriceMoves.forEach(m => {
+      const p  = PRODUCTS[m.productId];
+      const up = m.pctChange >= 0;
+      rows.push(`<div class="wb-row ${up ? 'text-success' : 'text-danger'}">${up ? '▲' : '▼'} ${p?.emoji ?? ''} ${p?.name ?? m.productId} ${up ? '+' : ''}${m.pctChange.toFixed(1)}%</div>`);
+    });
+
+    const el = document.createElement('div');
+    el.className = 'modal';
+    el.id = 'welcome-back-modal';
+    el.innerHTML = `
+      <div class="modal-card">
+        <h3>👋 Willkommen zurück!</h3>
+        <p class="text-muted wb-subtitle">Das ist während deiner Abwesenheit (${this.formatDuration(summary.offlineSeconds)}) passiert:</p>
+        <div class="wb-list">${rows.join('')}</div>
+        <button class="btn btn-primary btn-full" id="wb-close-btn">Los geht's</button>
+      </div>`;
+    document.body.appendChild(el);
+    document.getElementById('wb-close-btn')!.addEventListener('click', () => el.remove());
   }
 
   showNotification(text: string): void {

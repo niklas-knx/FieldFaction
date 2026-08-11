@@ -31,10 +31,11 @@ export function formatAmount(amount: number, unit: string): string {
   return `${amount.toLocaleString('de-DE')} ${unit}`;
 }
 
-export function productValue(productId: string, amount: number): number {
-  return Math.round(amount * (PRODUCTS[productId]?.sellPricePerUnit ?? 0));
+export function productValue(productId: string, amount: number, prices?: Record<string, number>): number {
+  const price = prices?.[productId] ?? PRODUCTS[productId]?.sellPricePerUnit ?? 0;
+  return Math.round(amount * price);
 }
 
-export function totalStorageValue(storage: Record<string, number>): number {
-  return Object.entries(storage).reduce((s, [id, amt]) => s + productValue(id, amt), 0);
+export function totalStorageValue(storage: Record<string, number>, prices?: Record<string, number>): number {
+  return Object.entries(storage).reduce((s, [id, amt]) => s + productValue(id, amt, prices), 0);
 }

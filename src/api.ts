@@ -1,4 +1,5 @@
-import type { GameState, MarketRequest, MarketBid, MarketCredit, ProductChange } from './types';
+import type { GameState, MarketRequest, MarketBid } from './types';
+import type { TickEvents } from './farm/Farm';
 
 const BASE = '/api';
 
@@ -42,24 +43,51 @@ export async function apiLogin(login: string, password: string): Promise<{ token
 }
 
 // ── Game State ────────────────────────────────────────────────────────────────
+// Seit Issue #7 ist der Server die alleinige Quelle der Wahrheit für den Spielzustand:
+// der Client liest ihn nur noch (apiLoadState) und schickt Absichten (apiDispatchAction),
+// nie mehr einen fertigen State-Blob. Ein PUT, das den Client-State ungeprüft übernimmt,
+// gibt es bewusst nicht mehr.
 
-export type LoadResult =
-  | { newGame: true }
-  | { newGame: false; state: GameState; offlineTicks: number };
+// Der Server legt bei Bedarf selbst einen neuen Spielstand an (createInitialState()
+// läuft nur noch serverseitig) — `state` ist daher immer vorhanden, `isNewGame` dient
+// nur noch der "Willkommen"-Anzeige, nicht mehr der Entscheidung, ob der Client selbst
+// einen State erzeugen muss.
+export interface LoadResult {
+  state: GameState;
+  events: TickEvents;
+  offlineSeconds: number;
+  isNewGame: boolean;
+  previousMarketPrices: Record<string, number>;
+}
 
 export async function apiLoadState(): Promise<LoadResult> {
   const res = await fetch(`${BASE}/game/state`, { headers: authHeaders() });
   const data = await handleResponse<any>(res);
-  if (data.newGame) return { newGame: true };
-  return { newGame: false, state: data.state, offlineTicks: data.offlineTicks };
+  return {
+    state: data.state,
+    events: data.events,
+    offlineSeconds: data.offlineSeconds,
+    isNewGame: data.newGame,
+    previousMarketPrices: data.previousMarketPrices ?? data.state.marketPrices,
+  };
 }
 
-export async function apiSaveState(state: GameState): Promise<void> {
-  await fetch(`${BASE}/game/state`, {
-    method: 'PUT',
+export interface DispatchResult {
+  state: GameState;
+  events: TickEvents;
+  notifications: string[];
+}
+
+// Führt eine einzelne Spielaktion serverseitig aus (z.B. 'tillPlot' mit [farmId, plotId])
+// — args müssen exakt der Parameterreihenfolge der jeweiligen Funktion in
+// src/farm/Farm.ts entsprechen (siehe server/src/game/actions.ts für die Allowlist).
+export async function apiDispatchAction(type: string, args: unknown[]): Promise<DispatchResult> {
+  const res = await fetch(`${BASE}/game/action`, {
+    method: 'POST',
     headers: authHeaders(),
-    body: JSON.stringify({ state }),
+    body: JSON.stringify({ type, args }),
   });
+  return handleResponse(res);
 }
 
 export async function apiResetState(): Promise<void> {
@@ -106,21 +134,6 @@ export async function apiCancelBid(bidId: number): Promise<void> {
   await fetch(`${BASE}/market/bid/${bidId}`, { method: 'DELETE', headers: authHeaders() });
 }
 
-// ── Market: Credits ───────────────────────────────────────────────────────────
-
-export async function apiGetMarketCredits(): Promise<{ credits: MarketCredit[] }> {
-  const res = await fetch(`${BASE}/market/credits`, { headers: authHeaders() });
-  return handleResponse(res);
-}
-
-export async function apiMarkCreditsApplied(ids: number[]): Promise<void> {
-  await fetch(`${BASE}/market/credits/apply`, {
-    method: 'POST',
-    headers: authHeaders(),
-    body: JSON.stringify({ ids }),
-  });
-}
-
 // ── Market: Reputation ────────────────────────────────────────────────────────
 
 export async function apiGetReputation(): Promise<{ reputation: Record<string, number> }> {
@@ -133,30 +146,4 @@ export async function apiGetReputation(): Promise<{ reputation: Record<string, n
 export async function apiGetMarketInfo(city: string, merchantId: string): Promise<{ competition: Record<string, number> }> {
   const res = await fetch(`${BASE}/market/info/${city}/${merchantId}`, { headers: authHeaders() });
   return handleResponse(res);
-}
-
-// ── Helper: Credits auf GameState anwenden ────────────────────────────────────
-
-export function applyMarketCredits(state: GameState, credits: MarketCredit[]): GameState {
-  let s = state;
-  for (const credit of credits) {
-    s = { ...s, money: s.money + credit.amountEur };
-    for (const change of credit.productChanges) {
-      const farm = s.farms[change.farmId];
-      if (!farm) continue;
-      const current = farm.storage[change.productId] ?? 0;
-      const newAmt   = Math.max(0, current + change.amount);
-      s = {
-        ...s,
-        farms: {
-          ...s.farms,
-          [change.farmId]: {
-            ...farm,
-            storage: { ...farm.storage, [change.productId]: newAmt },
-          },
-        },
-      };
-    }
-  }
-  return s;
 }

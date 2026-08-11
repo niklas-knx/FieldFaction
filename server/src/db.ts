@@ -60,4 +60,34 @@ export async function initTables(): Promise<void> {
       PRIMARY KEY (user_id, market_city)
     )
   `);
+  await pool.execute(`
+    CREATE TABLE IF NOT EXISTS market_requests (
+      id BIGINT AUTO_INCREMENT PRIMARY KEY,
+      city VARCHAR(64) NOT NULL,
+      merchant_id VARCHAR(64) NOT NULL,
+      product_id VARCHAR(64) NOT NULL,
+      quantity INT NOT NULL,
+      max_price_per_unit DOUBLE NOT NULL,
+      status ENUM('open','filled','expired') DEFAULT 'open',
+      expires_at BIGINT NOT NULL,
+      created_at BIGINT NOT NULL,
+      INDEX idx_city_status_expires (city, status, expires_at),
+      INDEX idx_status_expires (status, expires_at)
+    )
+  `);
+  await pool.execute(`
+    CREATE TABLE IF NOT EXISTS market_bids (
+      id BIGINT AUTO_INCREMENT PRIMARY KEY,
+      request_id BIGINT NOT NULL,
+      user_id INT NOT NULL,
+      farm_id VARCHAR(64) NOT NULL,
+      price_per_unit DOUBLE NOT NULL,
+      quantity_offered INT NOT NULL,
+      score FLOAT DEFAULT 0,
+      status ENUM('pending','won','lost') DEFAULT 'pending',
+      created_at BIGINT NOT NULL,
+      INDEX idx_request_status (request_id, status),
+      INDEX idx_user_status_created (user_id, status, created_at)
+    )
+  `);
 }

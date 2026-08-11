@@ -48,7 +48,7 @@ async function createCredit(
   );
 }
 
-function calcScore(reputation: number, pricePerUnit: number, maxPrice: number): number {
+export function calcScore(reputation: number, pricePerUnit: number, maxPrice: number): number {
   const repScore   = Math.pow(Math.max(0, Math.min(100, reputation)) / 100, 0.7);
   const priceScore = Math.max(0, 1 - pricePerUnit / maxPrice);
   return repScore * 0.55 + priceScore * 0.45;
@@ -100,7 +100,7 @@ async function generateRequests(now: number): Promise<void> {
 
 // ── 2. Abgelaufene Anfragen matchen ───────────────────────────────────────────
 
-async function processBids(now: number): Promise<void> {
+export async function processBids(now: number): Promise<void> {
   const [requests]: any = await pool.execute(
     'SELECT * FROM market_requests WHERE status = "open" AND expires_at <= ?',
     [now]

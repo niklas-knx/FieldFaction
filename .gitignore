@@ -17,3 +17,8 @@ Thumbs.db
 
 # Vite cache
 .vite/
+
+# Test artifacts
+playwright-report/
+test-results/
+coverage/

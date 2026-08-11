@@ -115,13 +115,14 @@ export interface FarmLocation {
   storage: Record<string, number>; // productId → units (kg, Stück, L)
 }
 
+export type EmployeeRole = 'farmer' | 'driver';
+
 export interface Employee {
-  id: number;
-  name: string;
-  role: 'farmer' | 'harvester' | 'planter';
-  wage: number;
-  efficiency: number;
-  assignedPlot: number | null;
+  uid: number;
+  role: EmployeeRole;
+  farmId: string;
+  wage: number;            // € pro echtem Tag (86.400 Ticks)
+  inUseUntilTick: number;  // 0 = frei; > state.tick = im Einsatz
 }
 
 export interface OwnedVehicle {
@@ -196,6 +197,19 @@ export interface MarketCredit {
   orderId: number | null;
 }
 
+// ── Logistik ──────────────────────────────────────────────────────────────────
+
+export interface Delivery {
+  id: number;
+  vehicleUid: number;
+  fromFarmId: string;
+  toFarmId: string;
+  productId: string;
+  amount: number;
+  departTick: number;
+  arriveTick: number;
+}
+
 // ── Game State ────────────────────────────────────────────────────────────────
 
 export interface GameState {
@@ -214,6 +228,13 @@ export interface GameState {
   vehicles: OwnedVehicle[];
   implements: OwnedImplement[];
   nextVehicleUid: number;
+  nextEmployeeUid: number;
   // Markt-System
   hofladen: Record<string, HofladenConfig>;  // farmId → Hofladen-Konfiguration
+  // Dynamische Kurse
+  marketPrices: Record<string, number>;      // productId → aktueller Verkaufspreis
+  priceHistory: Record<string, number[]>;    // productId → Tagesschlusskurse (älteste zuerst)
+  // Logistik
+  deliveries: Delivery[];
+  nextDeliveryId: number;
 }

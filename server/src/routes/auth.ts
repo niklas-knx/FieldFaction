@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import bcrypt from 'bcrypt';
 import { pool } from '../db';
 import { signToken } from '../middleware/auth';
+import { loginLimiter, registerLimiter } from '../middleware/rateLimit';
 
 const router = Router();
 
@@ -9,7 +10,7 @@ const USERNAME_RE = /^[a-zA-Z0-9_]{3,30}$/;
 const EMAIL_RE    = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 // POST /api/auth/register
-router.post('/register', async (req: Request, res: Response) => {
+router.post('/register', registerLimiter, async (req: Request, res: Response) => {
   const { username, email, password } = req.body ?? {};
 
   if (!USERNAME_RE.test(username ?? ''))
@@ -39,7 +40,7 @@ router.post('/register', async (req: Request, res: Response) => {
 });
 
 // POST /api/auth/login
-router.post('/login', async (req: Request, res: Response) => {
+router.post('/login', loginLimiter, async (req: Request, res: Response) => {
   const { login, password } = req.body ?? {};  // login = username oder email
 
   if (!login || !password)

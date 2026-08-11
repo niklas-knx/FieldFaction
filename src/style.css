@@ -980,6 +980,8 @@ html, body {
 .farm-fleet-empty { font-size: 12px; padding: 4px 0; }
 .fleet-shop-link { color: var(--accent); cursor: pointer; text-decoration: none; }
 .fleet-shop-link:hover { text-decoration: underline; }
+.fleet-hire-link { color: var(--accent); cursor: pointer; text-decoration: none; }
+.fleet-hire-link:hover { text-decoration: underline; }
 
 .farm-fleet-card {
   display: flex; align-items: center; gap: 10px;
@@ -1260,6 +1262,17 @@ kbd {
   gap: 8px;
 }
 
+/* ─── Willkommen zurück ─── */
+.wb-subtitle { margin: 0; font-size: 13px; }
+.wb-list { display: flex; flex-direction: column; gap: 6px; }
+.wb-row {
+  padding: 8px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 13px;
+}
+
 .crop-option {
   display: flex;
   align-items: center;
@@ -1339,6 +1352,7 @@ kbd {
 /* ─── Utility ─── */
 .text-muted   { color: var(--text-muted); }
 .text-success { color: var(--success); }
+.text-danger  { color: var(--danger); }
 .text-center  { text-align: center; }
 
 /* ─── Standort eröffnen ─── */
@@ -1815,3 +1829,91 @@ kbd {
 ::-webkit-scrollbar { width: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+/* ─── Kurse (Preisverlauf) ─── */
+.panel-title-link {
+  float: right;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--accent);
+  cursor: pointer;
+}
+.panel-title-link:hover { color: var(--text); }
+
+.price-trend-badge {
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.price-trend-flat { color: var(--text-muted); }
+
+.prices-layout {
+  display: flex;
+  gap: 20px;
+  padding-bottom: 24px;
+  align-items: flex-start;
+}
+.prices-sidebar-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 260px;
+  flex-shrink: 0;
+}
+.price-group-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 6px;
+}
+.price-product-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  margin-bottom: 4px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.15s;
+}
+.price-product-btn:hover { border-color: var(--accent); }
+.price-product-btn-active { border-color: var(--accent); background: #1a2e1a; color: var(--accent); }
+.price-product-emoji { font-size: 15px; }
+.price-product-name { flex: 1; }
+.price-product-val { color: var(--text-muted); font-size: 12px; font-weight: 600; }
+.price-product-btn-active .price-product-val { color: var(--accent); }
+
+.prices-chart-panel { flex: 1; min-width: 0; }
+.prices-chart-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 12px;
+  margin-bottom: 14px;
+}
+.prices-chart-title { font-size: 16px; font-weight: 700; }
+.prices-chart-price { font-size: 22px; font-weight: 800; color: var(--gold); }
+.prices-chart-change { font-size: 13px; font-weight: 700; }
+.prices-chart-base { width: 100%; font-size: 12px; }
+.prices-chart-season { width: 100%; font-size: 12px; font-weight: 600; margin-top: 2px; }
+
+.price-chart-svg { width: 100%; height: 220px; display: block; }
+.price-chart-baseline { stroke: var(--border); stroke-width: 1; stroke-dasharray: 4 4; }
+.price-chart-area-up   { fill: var(--success); opacity: 0.12; }
+.price-chart-area-down { fill: var(--danger);  opacity: 0.12; }
+.price-chart-line { fill: none; stroke: currentColor; stroke-width: 2.5; stroke-linejoin: round; stroke-linecap: round; }
+.price-chart-line-up   { color: var(--success); }
+.price-chart-line-down { color: var(--danger); }
+.price-chart-dot { fill: currentColor; }
+
+.prices-chart-days { margin-top: 8px; font-size: 11px; text-align: right; }
