@@ -44,18 +44,12 @@ export class LandingUI {
             <div class="lp-crop-row" aria-hidden="true">
               <span>🌾</span><span>🚜</span><span>🐄</span><span>🌽</span><span>🍅</span><span>🌻</span><span>🏪</span>
             </div>
-            <h1 class="lp-headline">
-              Baue dein<br>
-              <span class="lp-headline-accent">Landwirtschafts-Imperium.</span>
-            </h1>
+            <h1 class="lp-headline">FarmTycoon</h1>
             <p class="lp-subline">
-              Echtzeit-Strategie. Echter Wettbewerb.<br>
-              Pflanze, ernte und sichere dir die besten Marktpreise — gegen echte Spieler.
+              Ein Landwirtschaftsspiel im Browser: Felder bestellen, Tiere halten, Rohstoffe
+              verarbeiten und auf einem gemeinsamen Markt verkaufen, auf dem auch andere Spieler bieten.
             </p>
-            <a href="#auth" class="lp-cta-btn">
-              Jetzt kostenlos spielen
-              <span class="lp-cta-arrow">→</span>
-            </a>
+            <a href="#auth" class="lp-cta-btn">Jetzt spielen</a>
           </div>
         </section>
 
@@ -63,72 +57,34 @@ export class LandingUI {
         <section class="lp-features">
           <div class="lp-features-grid">
             <div class="lp-feature-card">
-              <div class="lp-feature-icon">📈</div>
-              <h3>Echtzeit-Markt</h3>
-              <p>Kunden posten Anfragen — du bietest. Wer Preis und Reputation kombiniert, gewinnt den Auftrag.</p>
+              <h3>Markt</h3>
+              <p>Kunden posten Anfragen, Spieler bieten darauf. Den Zuschlag bekommt, wer Preis und
+              Reputation am besten kombiniert. Neue Anfragen kommen laufend dazu.</p>
             </div>
             <div class="lp-feature-card">
-              <div class="lp-feature-icon">⏳</div>
               <h3>Echte Wachstumszeiten</h3>
-              <p>Weizen braucht 5 Tage. Du planst im Voraus — und erntest auch wenn du offline bist.</p>
+              <p>Weizen braucht zum Beispiel 5 Tage. Du planst im Voraus und erntest auch, wenn du
+              gerade nicht online bist.</p>
             </div>
             <div class="lp-feature-card">
-              <div class="lp-feature-icon">🌍</div>
               <h3>Mehrere Standorte</h3>
-              <p>Eröffne Höfe in ganz Deutschland. Jede Stadt hat ihren eigenen Markt-Charakter.</p>
+              <p>Höfe in unterschiedlichen Städten eröffnen — jede Stadt hat ein eigenes Preisniveau
+              und eigene Nachfrage.</p>
             </div>
             <div class="lp-feature-card">
-              <div class="lp-feature-icon">🏪</div>
-              <h3>Eigener Hofladen</h3>
-              <p>Setz deine Preise selbst. Kunden zahlen mehr — wenn sie dir vertrauen.</p>
+              <h3>Hofladen</h3>
+              <p>Eigene Preise für den Direktverkauf festlegen. Vertrauen bei Kunden zahlt sich mit der
+              Zeit aus.</p>
             </div>
             <div class="lp-feature-card">
-              <div class="lp-feature-icon">⭐</div>
               <h3>Reputation</h3>
-              <p>Zuverlässigkeit zahlt sich aus. Höhere Reputation = bessere Preise und mehr Chancen.</p>
+              <p>Zuverlässige Lieferungen verbessern deine Reputation — das bringt bessere Preise und
+              mehr Zuschläge bei Ausschreibungen.</p>
             </div>
             <div class="lp-feature-card">
-              <div class="lp-feature-icon">🐄</div>
-              <h3>Tiere & Verarbeitung</h3>
-              <p>Vom Feld zur Molkerei zur Käserei. Je mehr Verarbeitung, desto höher die Marge.</p>
-            </div>
-          </div>
-        </section>
-
-        <!-- HOW IT WORKS -->
-        <section class="lp-how">
-          <h2 class="lp-section-title">So funktioniert's</h2>
-          <div class="lp-steps">
-            <div class="lp-step">
-              <div class="lp-step-num">01</div>
-              <div class="lp-step-text">
-                <strong>Hof aufbauen</strong>
-                <span>Kaufe Parzellen, pflüge, säe — und warte auf die Ernte.</span>
-              </div>
-            </div>
-            <div class="lp-step-line"></div>
-            <div class="lp-step">
-              <div class="lp-step-num">02</div>
-              <div class="lp-step-text">
-                <strong>Marktanfragen beobachten</strong>
-                <span>Kunden suchen jede Minute neue Lieferanten in deiner Region.</span>
-              </div>
-            </div>
-            <div class="lp-step-line"></div>
-            <div class="lp-step">
-              <div class="lp-step-num">03</div>
-              <div class="lp-step-text">
-                <strong>Angebot abgeben</strong>
-                <span>Biete Preis + Menge. Score = dein Preisvorteil × deine Reputation.</span>
-              </div>
-            </div>
-            <div class="lp-step-line"></div>
-            <div class="lp-step">
-              <div class="lp-step-num">04</div>
-              <div class="lp-step-text">
-                <strong>Wachsen</strong>
-                <span>Erweitere auf neue Städte, baue Verarbeitungsketten auf, dominiere den Markt.</span>
-              </div>
+              <h3>Tierhaltung & Verarbeitung</h3>
+              <p>Vom Rohstoff zum verarbeiteten Produkt, z.B. Milch zu Käse — je mehr Verarbeitung, desto
+              höher der Verkaufspreis.</p>
             </div>
           </div>
         </section>
