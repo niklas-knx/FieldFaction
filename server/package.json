@@ -1,5 +1,5 @@
 {
-  "name": "farmtycoon-server",
+  "name": "fieldfaction-server",
   "version": "1.0.0",
   "scripts": {
     "dev": "tsx watch src/index.ts",

@@ -26,8 +26,8 @@ npm --prefix server install
 Datenbank anlegen und Schema einspielen (passe Verbindungsdaten nach Bedarf an):
 
 ```bash
-mysql -u root -p -e "CREATE DATABASE farmtycoon"
-mysql -u root -p farmtycoon < schema.sql
+mysql -u root -p -e "CREATE DATABASE fieldfaction"
+mysql -u root -p fieldfaction < schema.sql
 ```
 
 `schema.sql` legt `users` und `game_states` an. Die Markt-Tabellen
@@ -47,7 +47,7 @@ cp server/.env.example server/.env
 | `DB_PORT`         | MySQL-Port (Standard: 3306)                             |
 | `DB_USER`         | MySQL-Benutzer                                          |
 | `DB_PASSWORD`     | MySQL-Passwort                                          |
-| `DB_NAME`         | Datenbankname (Standard: `farmtycoon`)                  |
+| `DB_NAME`         | Datenbankname (Standard: `fieldfaction`)                  |
 | `JWT_SECRET`      | Zufälliger String, min. 64 Zeichen — signiert Login-Tokens |
 | `JWT_EXPIRES_IN`  | Gültigkeitsdauer der Tokens (Standard: `7d`)             |
 | `FRONTEND_ORIGIN` | Erlaubte CORS-Origin, gleichzeitig Basis für Verifizierungs-Links (Standard: `http://localhost:5173`) |
@@ -123,7 +123,7 @@ durchgespielt worden — vor dem produktiven Einsatz einmal end-to-end gegenprü
 
 **1. Datenbank in der bestehenden MySQL-Instanz anlegen** (z.B. in Workbench):
 ```sql
-CREATE DATABASE farmtycoon;
+CREATE DATABASE fieldfaction;
 ```
 Dann `schema.sql` gegen diese Datenbank ausführen (Workbench: *File → Run SQL Script*).
 
@@ -138,7 +138,7 @@ npm run build:all
 
 **3. `server\.env` konfigurieren** — `DB_HOST`/`DB_PORT`/`DB_USER`/`DB_PASSWORD` zeigen
 auf die bestehende MySQL-Instanz (z.B. `DB_HOST=localhost`, falls MySQL auf demselben
-Server läuft), `DB_NAME=farmtycoon`, `JWT_SECRET` setzen, `FRONTEND_ORIGIN` auf die
+Server läuft), `DB_NAME=fieldfaction`, `JWT_SECRET` setzen, `FRONTEND_ORIGIN` auf die
 später genutzte Domain/URL:
 ```powershell
 copy server\.env.example server\.env

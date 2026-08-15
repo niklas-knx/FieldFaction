@@ -104,7 +104,7 @@ export class FarmUI {
     this.container.innerHTML = `
       <div class="game-wrapper">
         <header class="top-bar">
-          <div class="top-bar-left"><span class="game-title">🌿 FarmTycoon</span></div>
+          <div class="top-bar-left"><span class="game-title">🌿 FieldFaction</span></div>
           <div class="top-bar-right" id="hud-money"></div>
         </header>
         <div class="game-body">
@@ -1483,7 +1483,7 @@ export class FarmUI {
     const dropdown = document.getElementById('new-loc-dropdown')!;
     try {
       const url  = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=json&countrycodes=de&limit=10&addressdetails=1&accept-language=de`;
-      const res  = await fetch(url, { headers: { 'User-Agent': 'FarmTycoon/1.0' } });
+      const res  = await fetch(url, { headers: { 'User-Agent': 'FieldFaction/1.0' } });
       const data: any[] = await res.json();
 
       // Nur echte Ortschaften: muss city/town/village/hamlet im address-Objekt haben

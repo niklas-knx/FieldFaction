@@ -23,7 +23,7 @@ export class LandingUI {
 
         <!-- NAV -->
         <nav class="lp-nav">
-          <span class="lp-nav-logo">🌿 FarmTycoon</span>
+          <span class="lp-nav-logo">🌿 FieldFaction</span>
           <a href="#auth" class="lp-nav-btn">Anmelden</a>
         </nav>
 
@@ -44,7 +44,7 @@ export class LandingUI {
             <div class="lp-crop-row" aria-hidden="true">
               <span>🌾</span><span>🚜</span><span>🐄</span><span>🌽</span><span>🍅</span><span>🌻</span><span>🏪</span>
             </div>
-            <h1 class="lp-headline">FarmTycoon</h1>
+            <h1 class="lp-headline">FieldFaction</h1>
             <p class="lp-subline">
               Ein Landwirtschaftsspiel im Browser: Felder bestellen, Tiere halten, Rohstoffe
               verarbeiten und auf einem gemeinsamen Markt verkaufen, auf dem auch andere Spieler bieten.
@@ -112,7 +112,7 @@ export class LandingUI {
 
         <!-- FOOTER -->
         <footer class="lp-footer">
-          <span class="lp-footer-logo">🌿 FarmTycoon</span>
+          <span class="lp-footer-logo">🌿 FieldFaction</span>
           <span class="lp-footer-copy">Early Access · Feedback willkommen</span>
         </footer>
 

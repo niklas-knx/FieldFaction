@@ -68,7 +68,7 @@ export class StartLocationUI {
     if (!dropdown) return;
     try {
       const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=json&countrycodes=de&limit=10&addressdetails=1&accept-language=de`;
-      const res  = await fetch(url, { headers: { 'User-Agent': 'FarmTycoon/1.0' } });
+      const res  = await fetch(url, { headers: { 'User-Agent': 'FieldFaction/1.0' } });
       const data: any[] = await res.json();
 
       const places = data.filter(d => {

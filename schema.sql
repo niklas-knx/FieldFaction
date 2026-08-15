@@ -1,5 +1,5 @@
--- FarmTycoon Datenbankschema
--- In MySQL Workbench ausführen, nachdem du eine Datenbank "farmtycoon" angelegt hast
+-- FieldFaction Datenbankschema
+-- In MySQL Workbench ausführen, nachdem du eine Datenbank "fieldfaction" angelegt hast
 
 CREATE TABLE IF NOT EXISTS users (
   id           INT AUTO_INCREMENT PRIMARY KEY,
