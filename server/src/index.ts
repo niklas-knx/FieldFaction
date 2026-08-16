@@ -13,6 +13,11 @@ dotenv.config();
 
 const app  = express();
 const PORT = Number(process.env.PORT ?? 3001);
+
+// Läuft hinter IIS/ARR als Reverse Proxy (immer auf localhost) — 'loopback' vertraut
+// X-Forwarded-For nur, wenn die Verbindung selbst von 127.0.0.1 kommt, siehe
+// https://express-rate-limit.github.io/ERR_ERL_UNEXPECTED_X_FORWARDED_FOR/
+app.set('trust proxy', 'loopback');
 const MATCHING_INTERVAL_MS = 60_000; // 60 Sekunden
 
 // ── Middleware ────────────────────────────────────────────────────────────────
