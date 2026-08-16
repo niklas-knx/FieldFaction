@@ -1,4 +1,4 @@
-import type { GameState, Plot, StallSize, FarmMeta, MarketRequest, MarketBid, HofladenOffer, EmployeeRole } from '../types';
+import type { GameState, Plot, StallSize, FarmMeta, MarketRequest, MarketBid, EmployeeRole } from '../types';
 import * as L from 'leaflet';
 import { CROPS, CROP_LIST } from '../data/crops';
 import { ANIMALS, ANIMAL_LIST, happinessLabel, happinessHearts, computeYield, getMaxAnimals, getBuyCost, getBreedingCycle } from '../data/animals';
@@ -205,7 +205,12 @@ export class FarmUI {
     document.getElementById('market-order-confirm')!.addEventListener('click', () => this.submitMarketOrder());
   }
 
-  render(state: GameState): void {
+  // `cosmetic` = rein kosmetischer Sekundentakt (siehe main.ts RENDER_INTERVAL_MS), ohne
+  // dass sich der State geändert hat — nur für Ansichten mit laufenden Fortschrittsbalken/
+  // Restzeiten relevant. Verhindert, dass z.B. die Hofladen-/Reputation-Tabs (ohne jede
+  // Zeitanzeige) jede Sekunde komplett neu aufgebaut werden und dabei z.B. offene
+  // Eingabefelder/Fokus verlieren.
+  render(state: GameState, cosmetic = false): void {
     if (state.tick !== this.lastSyncTick) {
       this.lastSyncTick = state.tick;
       this.lastSyncAtMs = Date.now();
@@ -223,6 +228,7 @@ export class FarmUI {
       const sidebarEl = document.getElementById('info-sidebar');
       if (sidebarEl) sidebarEl.innerHTML = '';
     } else if (this.currentView === 'market') {
+      if (cosmetic && this.marketTab !== 'anfragen') return; // nichts Zeitkritisches hier zu aktualisieren
       this.destroyLeafletMap();
       this.renderMarketView();
     } else if (this.currentView === 'prices') {
@@ -1046,37 +1052,26 @@ export class FarmUI {
 
     // Hofladen freischalten
     el.querySelectorAll('.hofladen-unlock-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
+      btn.addEventListener('click', async () => {
         const farmId = (btn as HTMLElement).dataset.farm!;
-        this.state = {
-          ...this.state,
-          hofladen: { ...this.state.hofladen, [farmId]: { unlocked: true, offers: [] } },
-        };
-        this.onStateChange(this.state);
+        await this.dispatch('unlockHofladen', [farmId]);
         this.renderMarketHofladenTab(el);
       });
     });
 
     // Angebot entfernen
     el.querySelectorAll('.hofladen-remove-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
+      btn.addEventListener('click', async () => {
         const farmId = (btn as HTMLElement).dataset.farm!;
         const idx    = Number((btn as HTMLElement).dataset.idx);
-        const config = this.state.hofladen[farmId];
-        if (!config) return;
-        const newOffers = config.offers.filter((_, i) => i !== idx);
-        this.state = {
-          ...this.state,
-          hofladen: { ...this.state.hofladen, [farmId]: { ...config, offers: newOffers } },
-        };
-        this.onStateChange(this.state);
+        await this.dispatch('removeHofladenOffer', [farmId, idx]);
         this.renderMarketHofladenTab(el);
       });
     });
 
     // Angebot hinzufügen
     el.querySelectorAll('.hofladen-add-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
+      btn.addEventListener('click', async () => {
         const farmId  = (btn as HTMLElement).dataset.farm!;
         const form    = btn.closest('.hofladen-add-form')!;
         const prodSel = form.querySelector('.hofladen-prod-sel') as HTMLSelectElement;
@@ -1092,19 +1087,7 @@ export class FarmUI {
         const maxPrice = base * 1.8;
         if (pricePerUnit > maxPrice) { bus.emit('notification', `❌ Max. ${maxPrice.toFixed(2)} € (1,8× Basispreis)`); return; }
 
-        const config = this.state.hofladen[farmId] ?? { unlocked: true, offers: [] };
-        const existing = config.offers.findIndex(o => o.productId === productId);
-        let newOffers: HofladenOffer[];
-        if (existing >= 0) {
-          newOffers = config.offers.map((o, i) => i === existing ? { productId, pricePerUnit, limitPerRound } : o);
-        } else {
-          newOffers = [...config.offers, { productId, pricePerUnit, limitPerRound }];
-        }
-        this.state = {
-          ...this.state,
-          hofladen: { ...this.state.hofladen, [farmId]: { ...config, offers: newOffers } },
-        };
-        this.onStateChange(this.state);
+        await this.dispatch('setHofladenOffer', [farmId, productId, pricePerUnit, limitPerRound]);
         this.renderMarketHofladenTab(el);
       });
     });

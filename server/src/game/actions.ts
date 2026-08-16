@@ -7,6 +7,7 @@ import {
   designateField, demolishPlot, sellToMerchant,
   startDelivery,
   hireEmployee, moveEmployee, fireEmployee,
+  unlockHofladen, setHofladenOffer, removeHofladenOffer,
 } from '../../../src/farm/Farm';
 
 // Every value-changing action the client used to apply to its own copy of GameState.
@@ -71,6 +72,12 @@ export const GAME_ACTIONS = {
   moveEmployee,
   // uid
   fireEmployee,
+  // farmId
+  unlockHofladen,
+  // farmId, productId, pricePerUnit, limitPerRound
+  setHofladenOffer,
+  // farmId, index
+  removeHofladenOffer,
 } as const;
 
 export type GameActionType = keyof typeof GAME_ACTIONS;

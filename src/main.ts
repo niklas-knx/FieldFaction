@@ -93,7 +93,7 @@ function enterGame(result: LoadedResult): void {
 
   // Rein kosmetischer Re-render-Takt: aktualisiert Fortschrittsbalken/Restzeiten im
   // Sekundentakt, ohne selbst neuen Spielzustand zu erzeugen.
-  setInterval(() => ui.render(state), RENDER_INTERVAL_MS);
+  setInterval(() => ui.render(state, true), RENDER_INTERVAL_MS);
 
   // Periodischer Sync: holt den serverseitig fortgeschriebenen Stand (Feldwachstum,
   // Tierproduktion, Lieferungen, Löhne, gewonnene Markt-Gebote, …) — Dinge, die ohne

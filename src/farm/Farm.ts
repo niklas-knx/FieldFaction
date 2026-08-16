@@ -922,6 +922,45 @@ export function sellToMerchant(state: GameState, farmId: string, productId: stri
   };
 }
 
+// ── Hofladen (Direktvermarktung) ────────────────────────────────────────────
+
+export function unlockHofladen(state: GameState, farmId: string): GameState {
+  const farm = state.farms[farmId];
+  if (!farm || state.hofladen[farmId]?.unlocked) return state;
+  bus.emit('notification', '🏪 Hofladen eröffnet!');
+  return {
+    ...state,
+    hofladen: { ...state.hofladen, [farmId]: { unlocked: true, offers: [] } },
+  };
+}
+
+// Preis wird serverseitig gedeckelt (max 1.8× Basispreis) statt dem Client zu vertrauen —
+// dieselbe Grenze, die FarmUI schon vor dem Absenden prüft, aber hier verbindlich.
+export function setHofladenOffer(
+  state: GameState, farmId: string, productId: string, pricePerUnit: number, limitPerRound: number,
+): GameState {
+  const config = state.hofladen[farmId];
+  if (!config?.unlocked || !PRODUCTS[productId] || !(pricePerUnit > 0) || !(limitPerRound > 0)) return state;
+
+  const maxPrice = (currentPrice(state, productId) || 1) * 1.8;
+  const offer = { productId, pricePerUnit: Math.min(pricePerUnit, maxPrice), limitPerRound };
+  const existingIdx = config.offers.findIndex(o => o.productId === productId);
+  const offers = existingIdx >= 0
+    ? config.offers.map((o, i) => i === existingIdx ? offer : o)
+    : [...config.offers, offer];
+
+  return { ...state, hofladen: { ...state.hofladen, [farmId]: { ...config, offers } } };
+}
+
+export function removeHofladenOffer(state: GameState, farmId: string, index: number): GameState {
+  const config = state.hofladen[farmId];
+  if (!config) return state;
+  return {
+    ...state,
+    hofladen: { ...state.hofladen, [farmId]: { ...config, offers: config.offers.filter((_, i) => i !== index) } },
+  };
+}
+
 export function sellFromStorage(state: GameState, farmId: string, productId: string, amount: number): GameState {
   const farm = state.farms[farmId];
   if (!farm) return state;
