@@ -32,15 +32,17 @@ export const ANIMALS: Record<string, AnimalDef> = {
     slaughterProductId: 'chicken_meat',
     slaughterKgPerAnimal: 2,
     // ─── Produktion ─────────────────────────────────
-    yieldPerAnimalPerCycle: 0.8, // Eier/Tier/Zyklus
+    // Realistische Legerate: ~1 Ei/Huhn/Tag, Zyklus = 1 Spieltag (24 Echtstunden, siehe
+    // TICKS_PER_DAY) statt der früheren "alle 2 Minuten" — fühlte sich nicht wie ein Hof an.
+    yieldPerAnimalPerCycle: 1, // Eier/Tier/Zyklus
     productId: 'eggs',
     productName: 'Eier',
     productEmoji: '🥚',
     productUnit: 'Stück',
-    cycleSeconds: 120,
+    cycleSeconds: 86400,
     sellPricePerUnit: 0.35,
-    // Freiland max: 50 × 0.8 × 1.0 = 40 Eier/Zyklus = 14 €
-    // Massen max:  250 × 0.8 × 0.3 = 60 Eier/Zyklus = 21 €
+    // Freiland max: 50 × 1 × 1.0 = 50 Eier/Tag = 17,50 €
+    // Massen max:  250 × 1 × 0.3 = 75 Eier/Tag = 26,25 €
   },
 
   cow: {
@@ -67,15 +69,17 @@ export const ANIMALS: Record<string, AnimalDef> = {
     slaughterProductId: 'beef',
     slaughterKgPerAnimal: 150,
     // ─── Produktion ─────────────────────────────────
-    yieldPerAnimalPerCycle: 3, // L Milch/Kuh/Zyklus
+    // Realistische Milchleistung: ~25 L/Kuh/Tag, Zyklus = 1 Spieltag (24 Echtstunden)
+    // statt der früheren "alle 3 Minuten" — analog zur Hühner-Anpassung.
+    yieldPerAnimalPerCycle: 25, // L Milch/Kuh/Zyklus
     productId: 'milk',
     productName: 'Milch',
     productEmoji: '🥛',
     productUnit: 'L',
-    cycleSeconds: 180,
+    cycleSeconds: 86400,
     sellPricePerUnit: 0.46,
-    // Freiland max: 8  × 3 × 1.0 = 24 L/Zyklus = 11 €
-    // Massen max:  30  × 3 × 0.3 = 27 L/Zyklus = 12 €
+    // Freiland max: 8  × 25 × 1.0 = 200 L/Tag = 92 €
+    // Massen max:  30  × 25 × 0.3 = 225 L/Tag = 103,50 €
   },
 
   pig: {
