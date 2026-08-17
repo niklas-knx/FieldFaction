@@ -194,7 +194,7 @@ export async function processBids(now: number): Promise<void> {
 export async function processHofladenSales(
   userId: number, state: any, elapsedSeconds: number, now: number,
 ): Promise<any> {
-  if (!state?.hofladen || typeof state.hofladen !== 'object' || elapsedSeconds <= 0) return state;
+  if (!state?.hofladen || typeof state.hofladen !== 'object') return state;
 
   let s = state;
   let totalEarned = 0;
@@ -203,34 +203,44 @@ export async function processHofladenSales(
     if (!config?.unlocked || !Array.isArray(config.offers) || config.offers.length === 0) continue;
 
     const meta = (state.farmMeta as any[])?.find((m: any) => m.id === farmId);
-    if (!meta) continue;
     const cityId = farmId.includes('_') && /\d{10,}$/.test(farmId)
       ? farmId.replace(/_\d+$/, '') : farmId;
 
-    const rep             = await getReputation(userId, cityId);
+    // Angebote aus der Zeit vor dem Stock-Modell (nur limitPerRound, kein stock-Feld)
+    // müssen einmalig normalisiert werden, sonst wird `stock + x` zu NaN. Passiert
+    // unabhängig von elapsedSeconds, damit auch zwei Aktionen in derselben Sekunde
+    // (elapsedSeconds rundet auf 0) noch ein gültiges stock-Feld sehen.
+    const needsNormalize = config.offers.some((o: any) => typeof o.stock !== 'number');
+
+    let rep = 0;
+    if (elapsedSeconds > 0 && meta) rep = await getReputation(userId, cityId);
     const trafficPerMinute = 20 + rep * 2;
 
     let farmEarned = 0;
     const offers = config.offers.map((offer: any) => {
-      const { productId, pricePerUnit, stock } = offer;
-      if (!(stock > 0) || !(pricePerUnit > 0)) return offer;
+      const stock = typeof offer.stock === 'number' ? offer.stock : 0;
+      const withStock = { ...offer, stock };
 
-      const basePrc = BASE_PRICES[productId] ?? 0;
-      if (basePrc <= 0) return offer;
-      const ratio      = pricePerUnit / basePrc;
+      if (elapsedSeconds <= 0 || !meta || !(stock > 0) || !(offer.pricePerUnit > 0)) return withStock;
+      const basePrc = BASE_PRICES[offer.productId] ?? 0;
+      if (basePrc <= 0) return withStock;
+
+      const ratio      = offer.pricePerUnit / basePrc;
       const elasticity = Math.max(0.05, 1 - Math.max(0, ratio - 1.2) * 2);
       const sellable   = Math.floor(trafficPerMinute * (elapsedSeconds / 60) * elasticity);
       const sold       = Math.min(Math.floor(stock), sellable);
-      if (sold <= 0) return offer;
+      if (sold <= 0) return withStock;
 
-      farmEarned += Math.round(sold * pricePerUnit);
-      return { ...offer, stock: stock - sold };
+      farmEarned += Math.round(sold * offer.pricePerUnit);
+      return { ...withStock, stock: stock - sold };
     });
 
-    if (farmEarned > 0) {
+    if (farmEarned > 0 && meta) {
       totalEarned += farmEarned;
-      s = { ...s, hofladen: { ...s.hofladen, [farmId]: { ...config, offers } } };
       await upsertReputation(userId, cityId, 1.0);
+    }
+    if (needsNormalize || farmEarned > 0) {
+      s = { ...s, hofladen: { ...s.hofladen, [farmId]: { ...config, offers } } };
     }
   }
 

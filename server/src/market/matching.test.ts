@@ -211,4 +211,27 @@ describe('processHofladenSales', () => {
     expect(result.money).toBe(1000);
     expect(execute).not.toHaveBeenCalledWith(expect.stringMatching(/INSERT INTO market_reputation/), expect.anything());
   });
+
+  it('normalizes legacy offers without a stock field (pre-migration saves) to 0 instead of NaN, even with zero elapsed time', async () => {
+    installReputationMock(10);
+    const state = {
+      money: 1000,
+      farmMeta: [{ id: 'muenchen', city: 'München' }],
+      farms: { muenchen: { storage: {} } },
+      hofladen: {
+        muenchen: {
+          unlocked: true,
+          // Alte Form vor dem Stock-Modell: limitPerRound statt stock.
+          offers: [{ productId: 'eggs', pricePerUnit: 0.35, limitPerRound: 30 }],
+        },
+      },
+    };
+
+    // elapsedSeconds = 0 simuliert zwei Aktionen innerhalb derselben Sekunde.
+    const result = await processHofladenSales(userId, state, 0, now);
+
+    const stock = result.hofladen.muenchen.offers[0].stock;
+    expect(stock).toBe(0);
+    expect(Number.isNaN(stock)).toBe(false);
+  });
 });
