@@ -1,9 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import {
   createInitialState, designateField, tillPlot, plantCrop, harvestPlot, tickGame,
+  buildStall, collectStall,
   FIELD_WORK_TICKS,
 } from './Farm';
 import { CROPS } from '../data/crops';
+import { stallCapacity } from '../data/animals';
 
 const FARM_ID = 'muenchen';
 const PLOT_ID = 0; // unlocked from the start
@@ -86,6 +88,51 @@ describe('field lifecycle: empty -> fallow -> tilled -> planted -> ready -> harv
     const result = harvestPlot(state, FARM_ID, PLOT_ID);
     expect(result).toBe(before); // no-op: fieldState is 'fallow', not 'ready'
   });
+});
+
+describe('animal production trickles into a capped stall buffer', () => {
+  it('accrues gradually over the day, hard-caps at stallCapacity, and resumes after collecting', () => {
+    let state = createInitialState();
+    state = buildStall(state, FARM_ID, PLOT_ID, 'chicken', 'full');
+
+    // Direkt auf 50 Tiere (Freiland-Maximum) setzen, um Zucht-Nebeneffekte (alle 600 Ticks
+    // +1 Tier) aus diesem Test rauszuhalten — es geht hier nur um die Produktionsrate.
+    state = {
+      ...state,
+      farms: {
+        ...state.farms,
+        [FARM_ID]: {
+          ...state.farms[FARM_ID],
+          plots: state.farms[FARM_ID].plots.map(p =>
+            p.id === PLOT_ID ? { ...p, stallA: { ...p.stallA, animalCount: 50 } } : p
+          ),
+        },
+      },
+    };
+    const stallA = () => state.farms[FARM_ID].plots[PLOT_ID].stallA;
+
+    // 50 Hühner × 1 Ei/Tag × Freiland-Happiness 1.0 = 50 Eier/Tag → Kapazität = ceil(50/6) = 9
+    const capacity = stallCapacity('chicken', 50, 'full');
+    expect(capacity).toBe(9);
+
+    // Rate = 50/86400 Eier/Sekunde. Für das erste ganze Ei: ceil(86400/50) = 1728 Ticks.
+    state = advanceTicks(state, 1727);
+    expect(stallA().outputReady).toBe(0); // noch nicht alle Hühner auf einmal
+    state = advanceTicks(state, 1);
+    expect(stallA().outputReady).toBe(1);
+
+    // Weit über die Kapazität hinaus laufen lassen — darf trotzdem nicht mehr als 9 werden.
+    state = advanceTicks(state, 50_000);
+    expect(stallA().outputReady).toBe(capacity);
+
+    // Einlagern leert den Puffer ins Lager; danach läuft die Produktion weiter.
+    state = collectStall(state, FARM_ID, PLOT_ID, 0);
+    expect(stallA().outputReady).toBe(0);
+    expect(state.farms[FARM_ID].storage.eggs).toBe(capacity);
+
+    state = advanceTicks(state, 1728);
+    expect(stallA().outputReady).toBe(1);
+  }, 30_000);
 });
 
 describe('createInitialState with a chosen starting location', () => {

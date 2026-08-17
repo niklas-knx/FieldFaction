@@ -152,6 +152,18 @@ export function computeYield(animalId: string, animalCount: number, size: 'full'
   return Math.floor(animalCount * a.yieldPerAnimalPerCycle * happiness);
 }
 
+// Wie oft am Tag der Stall manuell geleert werden muss, bevor die Produktion pausiert —
+// Tiere legen/produzieren nicht mehr alle gleichzeitig am Zyklusende, sondern laufend über
+// den Tag verteilt in einen Puffer (StallSlot.outputReady), der bei Erreichen dieser
+// Kapazität stoppt, bis der Spieler ihn einsammelt (siehe tickGame() in Farm.ts).
+const COLLECTIONS_PER_DAY = 6; // ≈ alle 4 Stunden fällig
+
+export function stallCapacity(animalId: string, animalCount: number, size: 'full' | 'half'): number {
+  const dailyYield = computeYield(animalId, animalCount, size);
+  if (dailyYield <= 0) return 0;
+  return Math.max(1, Math.ceil(dailyYield / COLLECTIONS_PER_DAY));
+}
+
 export function happinessMultiplier(size: 'full' | 'half'): number {
   // Used externally if needed
   return size === 'full' ? 1.0 : 0.30;

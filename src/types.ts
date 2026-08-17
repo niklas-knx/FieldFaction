@@ -68,7 +68,8 @@ export interface ProcessingSlot {
 export interface StallSlot {
   animalId: string | null;
   animalCount: number;
-  productionReady: boolean;
+  outputReady: number;      // im Stall aufgelaufene, noch nicht eingelagerte Produktion (gedeckelt, siehe stallCapacity)
+  productionAccum: number;  // interner Bruchteil-Puffer für die kontinuierliche Zuwachsrate
   lastCollectedAt: number;
   lastBreedingAt: number;
 }

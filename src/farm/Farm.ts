@@ -2,7 +2,7 @@ import type { GameState, FarmLocation, FarmMeta, Plot, StallSlot, Season, StallS
 import { VEHICLES } from '../data/vehicles';
 import { IMPLEMENTS } from '../data/implements';
 import { CROPS } from '../data/crops';
-import { ANIMALS, computeYield, getMaxAnimals, getBuyCost, getBreedingCycle, getStartingAnimals } from '../data/animals';
+import { ANIMALS, computeYield, stallCapacity, getMaxAnimals, getBuyCost, getBreedingCycle, getStartingAnimals } from '../data/animals';
 import { PROCESSING_BUILDINGS, processingSpaceUnits, usedSpaceUnits, PLOT_TOTAL_UNITS } from '../data/processing';
 import { FARM_META } from '../data/farmLocations';
 import { PRODUCTS, formatAmount } from '../data/products';
@@ -187,7 +187,7 @@ export function currentPrice(state: GameState, productId: string): number {
 }
 
 function emptyStallSlot(tick = 0): StallSlot {
-  return { animalId: null, animalCount: 0, productionReady: false, lastCollectedAt: tick, lastBreedingAt: tick };
+  return { animalId: null, animalCount: 0, outputReady: 0, productionAccum: 0, lastCollectedAt: tick, lastBreedingAt: tick };
 }
 
 function makePlot(id: number): Plot {
@@ -329,9 +329,25 @@ export function tickGame(state: GameState): { state: GameState; events: TickEven
           const maxAnimals   = getMaxAnimals(slot.animalId, plot.stallSize);
           const breedCycle   = getBreedingCycle(slot.animalId, plot.stallSize);
           let s = slot;
-          if (!animal.noProductCycle && !s.productionReady && tick - s.lastCollectedAt >= animal.cycleSeconds) {
-            s = { ...s, productionReady: true };
-            events.stallCollectionsReady += 1;
+          // Statt einmal pro vollem Zyklus alles auf einen Schlag: Tiere produzieren laufend
+          // in kleinen Schritten über den Tag verteilt (Rate = Tagesertrag / TICKS_PER_DAY),
+          // gesammelt in einem gedeckelten Puffer. Ist der Puffer voll, pausiert die
+          // Produktion, bis der Spieler manuell einlagert (collectStall) — genau das erzwingt
+          // regelmäßiges Vorbeischauen statt eines einzigen Abholmoments pro Tag.
+          if (!animal.noProductCycle) {
+            const capacity = stallCapacity(slot.animalId, s.animalCount, plot.stallSize);
+            if (s.outputReady < capacity) {
+              const dailyYield = computeYield(slot.animalId, s.animalCount, plot.stallSize);
+              const accum = s.productionAccum + dailyYield / TICKS_PER_DAY;
+              const whole = Math.floor(accum);
+              if (whole > 0) {
+                const newReady = Math.min(capacity, s.outputReady + whole);
+                if (s.outputReady === 0 && newReady > 0) events.stallCollectionsReady += 1;
+                s = { ...s, outputReady: newReady, productionAccum: accum - whole };
+              } else {
+                s = { ...s, productionAccum: accum };
+              }
+            }
           }
           if (s.animalCount < maxAnimals && tick - s.lastBreedingAt >= breedCycle)
             s = { ...s, animalCount: s.animalCount + 1, lastBreedingAt: tick };
@@ -648,7 +664,7 @@ export function buildStall(state: GameState, farmId: string, plotId: number, ani
   const starting = getStartingAnimals(animalId, size);
   bus.emit('notification', `🏗️ ${animal.name}-Stall (${sizeLabel}) gebaut – ${starting} Tier(e) dabei`);
   const slotA: StallSlot = { animalId, animalCount: starting,
-    productionReady: false, lastCollectedAt: state.tick, lastBreedingAt: state.tick };
+    outputReady: 0, productionAccum: 0, lastCollectedAt: state.tick, lastBreedingAt: state.tick };
   return {
     ...updateFarm(state, farmId, { plots: updPlot(farm, plotId, {
       plotType: 'stall', stallSize: size,
@@ -665,12 +681,12 @@ export function collectStall(state: GameState, farmId: string, plotId: number, s
   const plot = farm?.plots.find(p => p.id === plotId);
   if (!plot || plot.plotType !== 'stall') return state;
   const stallSlot = slot === 0 ? plot.stallA : plot.stallB;
-  if (!stallSlot?.productionReady || !stallSlot.animalId) return state;
+  if (!stallSlot?.animalId || !(stallSlot.outputReady > 0)) return state;
   const animal = ANIMALS[stallSlot.animalId];
   if (!animal) return state;
-  const yield_ = computeYield(stallSlot.animalId, stallSlot.animalCount, plot.stallSize);
-  if (yield_ > 0) bus.emit('notification', `🧺 ${yield_} ${animal.productEmoji} ${animal.productName} eingelagert`);
-  const newSlot: StallSlot = { ...stallSlot, productionReady: false, lastCollectedAt: state.tick };
+  const yield_ = stallSlot.outputReady;
+  bus.emit('notification', `🧺 ${yield_} ${animal.productEmoji} ${animal.productName} eingelagert`);
+  const newSlot: StallSlot = { ...stallSlot, outputReady: 0, lastCollectedAt: state.tick };
   const newStorage = { ...farm.storage, [animal.productId]: (farm.storage[animal.productId] ?? 0) + yield_ };
   return updateFarm(state, farmId, {
     plots: updPlot(farm, plotId, slot === 0 ? { stallA: newSlot } : { stallB: newSlot }),
@@ -712,7 +728,7 @@ export function buildSecondHalfStall(state: GameState, farmId: string, plotId: n
   const starting = getStartingAnimals(animalId, 'half');
   bus.emit('notification', `🏗️ ${animal.name}-Stall (zweite Hälfte) – ${starting} Tier(e) dabei`);
   const newB: StallSlot = { animalId, animalCount: starting,
-    productionReady: false, lastCollectedAt: state.tick, lastBreedingAt: state.tick };
+    outputReady: 0, productionAccum: 0, lastCollectedAt: state.tick, lastBreedingAt: state.tick };
   return {
     ...updateFarm(state, farmId, { plots: updPlot(farm, plotId, { stallB: newB }) }),
     money: state.money - cost,
@@ -1038,11 +1054,14 @@ export function growthProgress(plot: Plot, currentTick: number): number {
   return Math.min(1, (currentTick - plot.plantedAt) / plot.growthTicks);
 }
 
-export function slotProgress(slot: StallSlot, currentTick: number): number {
-  if (!slot.animalId || slot.productionReady) return slot.productionReady ? 1 : 0;
+// Füllstand des Stall-Puffers relativ zur Kapazität (0 = leer, 1 = voll/pausiert).
+export function slotProgress(slot: StallSlot, stallSize: StallSize): number {
+  if (!slot.animalId || slot.animalCount === 0) return 0;
   const animal = ANIMALS[slot.animalId];
-  if (!animal || slot.animalCount === 0) return 0;
-  return Math.min(1, (currentTick - slot.lastCollectedAt) / animal.cycleSeconds);
+  if (!animal || animal.noProductCycle) return 0;
+  const capacity = stallCapacity(slot.animalId, slot.animalCount, stallSize);
+  if (capacity <= 0) return 0;
+  return Math.min(1, slot.outputReady / capacity);
 }
 
 export function slotBreedProgress(slot: StallSlot, stallSize: 'full' | 'half', currentTick: number): number {
@@ -1057,7 +1076,7 @@ export function farmReadyCount(farm: FarmLocation): number {
   return farm.plots.filter(p => {
     if (p.locked) return false;
     if (p.plotType === 'field') return p.fieldState === 'ready';
-    if (p.plotType === 'stall') return p.stallA.productionReady || (p.stallB?.productionReady ?? false);
+    if (p.plotType === 'stall') return p.stallA.outputReady > 0 || (p.stallB?.outputReady ?? 0) > 0;
     if (p.plotType === 'processing') return p.processingSlots.some(s => s.outputReady > 0);
     return false;
   }).length;

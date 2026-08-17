@@ -1,7 +1,7 @@
 import type { GameState, Plot, StallSize, FarmMeta, MarketRequest, MarketBid, EmployeeRole } from '../types';
 import * as L from 'leaflet';
 import { CROPS, CROP_LIST } from '../data/crops';
-import { ANIMALS, ANIMAL_LIST, happinessLabel, happinessHearts, computeYield, getMaxAnimals, getBuyCost, getBreedingCycle } from '../data/animals';
+import { ANIMALS, ANIMAL_LIST, happinessLabel, happinessHearts, computeYield, stallCapacity, getMaxAnimals, getBuyCost, getBreedingCycle } from '../data/animals';
 import { PRODUCTS, formatAmount, productValue, totalStorageValue } from '../data/products';
 import {
   growthProgress, slotProgress, slotBreedProgress, farmReadyCount, nextBuyablePlot,
@@ -1376,7 +1376,7 @@ export class FarmUI {
     const card   = document.createElement('div');
     const farmId = this.state.activeFarmId;
     const isSplit = plot.stallSize === 'half';
-    const anyReady = plot.stallA.productionReady || (plot.stallB?.productionReady ?? false);
+    const anyReady = plot.stallA.outputReady > 0 || (plot.stallB?.outputReady ?? 0) > 0;
     card.className = `field-card stall-card ${anyReady ? 'stall-card-ready' : ''}`;
 
     const tagLabel = isSplit
@@ -1400,10 +1400,12 @@ export class FarmUI {
       const max       = getMaxAnimals(slot.animalId, plot.stallSize);
       const buyCost   = getBuyCost(slot.animalId, plot.stallSize);
       const breedCyc  = getBreedingCycle(slot.animalId, plot.stallSize);
-      const yield_    = computeYield(slot.animalId, count, plot.stallSize);
-      const val       = Math.round(yield_ * currentPrice(this.state, animal.productId));
+      const dailyYield = computeYield(slot.animalId, count, plot.stallSize);
+      const capacity  = stallCapacity(slot.animalId, count, plot.stallSize);
+      const waiting   = slot.outputReady;
+      const val       = Math.round(waiting * currentPrice(this.state, animal.productId));
       const canBuy    = count < max && this.state.money >= buyCost;
-      const prog      = slotProgress(slot, this.displayTick());
+      const prog      = slotProgress(slot, plot.stallSize);
       const breedProg = slotBreedProgress(slot, plot.stallSize, this.displayTick());
       const breedSec  = count < max ? Math.ceil((1 - breedProg) * breedCyc) : 0;
       const sid       = `s${plot.id}-${slotIdx}`;
@@ -1431,18 +1433,21 @@ export class FarmUI {
           id="${sid}-buy" ${canBuy ? '' : 'disabled'}>
           + Tier · ${buyCost} €
         </button>
-        ${animal.noProductCycle ? '' : slot.productionReady ? `
+        ${animal.noProductCycle ? '' : waiting > 0 ? `
           <div class="stall-ready-row">
-            <span>${animal.productEmoji} <strong>${yield_} ${animal.productUnit}</strong></span>
+            <span>${animal.productEmoji} <strong>${waiting} ${animal.productUnit}</strong></span>
             <span class="stall-val">+${val} €</span>
           </div>
           <button class="stall-collect-btn" id="${sid}-collect">Einlagern</button>
+          <span class="fc-yield-hint">${waiting >= capacity
+            ? '🛑 Stall voll — Produktion pausiert bis zum Einlagern'
+            : `füllt sich weiter (${waiting}/${capacity})`}</span>
         ` : count > 0 ? `
           <div class="fc-progress-wrap">
             <div class="fc-progress-bar">
               <div class="fc-progress-fill" style="width:${prog*100}%;background:#c47a30"></div>
             </div>
-            <span class="fc-time-remain">${Math.ceil((1-prog)*animal.cycleSeconds)}s · ${yield_} ${animal.productUnit}</span>
+            <span class="fc-time-remain">0/${capacity} ${animal.productUnit} im Stall · ${dailyYield}/Tag möglich</span>
           </div>` : `<span class="fc-yield-hint">Keine Tiere</span>`}
       </div>`;
     };
@@ -1452,7 +1457,7 @@ export class FarmUI {
       ${isSplit ? `<div class="stall-slot-divider"></div>${
         plot.stallB
           ? renderSlotSection(plot.stallB, 1)
-          : renderSlotSection({ animalId: null, animalCount: 0, productionReady: false, lastCollectedAt: 0, lastBreedingAt: 0 }, 1)
+          : renderSlotSection({ animalId: null, animalCount: 0, outputReady: 0, productionAccum: 0, lastCollectedAt: 0, lastBreedingAt: 0 }, 1)
       }` : ''}
     </div>`;
 
@@ -2531,7 +2536,7 @@ export class FarmUI {
     const totalVal       = totalStorageValue(farm.storage, this.state.marketPrices);
     const readyPlots     = farm.plots.filter(p => !p.locked &&
       ((p.plotType === 'field' && p.fieldState === 'ready') ||
-       (p.plotType === 'stall' && (p.stallA.productionReady || (p.stallB?.productionReady ?? false))) ||
+       (p.plotType === 'stall' && (p.stallA.outputReady > 0 || (p.stallB?.outputReady ?? 0) > 0)) ||
        (p.plotType === 'processing' && p.processingSlots.some(s => s.outputReady > 0))));
 
     el.innerHTML = `
@@ -2570,8 +2575,8 @@ export class FarmUI {
         if (p.plotType === 'field' && p.fieldState === 'ready') {
           await this.dispatch('harvestPlot', [farmId, p.id]);
         } else if (p.plotType === 'stall') {
-          if (p.stallA.productionReady) await this.dispatch('collectStall', [farmId, p.id, 0]);
-          if (p.stallB?.productionReady) await this.dispatch('collectStall', [farmId, p.id, 1]);
+          if (p.stallA.outputReady > 0) await this.dispatch('collectStall', [farmId, p.id, 0]);
+          if ((p.stallB?.outputReady ?? 0) > 0) await this.dispatch('collectStall', [farmId, p.id, 1]);
         } else if (p.plotType === 'processing') {
           for (let i = 0; i < p.processingSlots.length; i++) {
             if (p.processingSlots[i].outputReady > 0) await this.dispatch('collectProcessingOutput', [farmId, p.id, i]);
