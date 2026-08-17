@@ -8,6 +8,7 @@ import {
 import type { MarketCredit, StartLocationInput } from '../game/simulate';
 import { GAME_ACTIONS, isGameActionType } from '../game/actions';
 import { bus } from '../../../src/core/EventBus';
+import { processHofladenSales, ensureMarketFresh } from '../market/matching';
 
 const router = Router();
 const SAVE_VERSION = 11; // muss mit src/main.ts übereinstimmen
@@ -76,6 +77,10 @@ async function applyPendingCredits(userId: number, state: any): Promise<any> {
 // Startort gewählt hat (siehe POST /start). Persistiert hier bewusst NICHT: Aufrufer
 // entscheiden selbst, mit welchem Endergebnis gespeichert wird.
 async function loadAndAdvance(userId: number, now: number) {
+  // Ersetzt den früheren 60s-Server-Tick für Händler-Anfragen/Gebote: generiert/matched
+  // nur, wenn seit dem letzten Sweep (über alle Spieler hinweg) genug Zeit vergangen ist.
+  await ensureMarketFresh(now);
+
   const row = await loadStateRow(userId);
   if (!row) throw new NoGameYetError();
 
@@ -85,9 +90,14 @@ async function loadAndAdvance(userId: number, now: number) {
   state = await applyPendingCredits(userId, state);
 
   const elapsedSeconds = Math.max(0, (now - lastSavedAt) / 1000);
+  const cappedElapsedSeconds = Math.min(elapsedSeconds, MAX_CATCHUP_TICKS);
   const { state: advanced, events } = advanceState(state, elapsedSeconds, MAX_CATCHUP_TICKS);
 
-  const shape = validateGameStateShape(advanced);
+  // Hofladen-Verkäufe: kein eigener Tick mehr, sondern hier mit demselben (gedeckelten)
+  // Zeitfenster wie advanceState() nachgerechnet — siehe processHofladenSales().
+  const withHofladen = await processHofladenSales(userId, advanced, cappedElapsedSeconds, now);
+
+  const shape = validateGameStateShape(withHofladen);
   if (!shape.valid) {
     // Bug in der Simulation, nicht Cheating (der Client liefert hier keine Daten mehr) —
     // laut loggen statt einen kaputten Zustand weiterzureichen.
@@ -95,7 +105,7 @@ async function loadAndAdvance(userId: number, now: number) {
   }
 
   return {
-    state: advanced,
+    state: withHofladen,
     events,
     offlineSeconds: Math.round(elapsedSeconds),
     // Preise vor dem Nachholen — nur für die "Willkommen zurück"-Anzeige (größte

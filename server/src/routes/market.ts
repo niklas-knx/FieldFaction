@@ -3,6 +3,7 @@ import { pool } from '../db';
 import { requireAuth } from '../middleware/auth';
 import { marketWriteLimiter } from '../middleware/rateLimit';
 import { CITY_MERCHANTS, getMerchantPrice } from '../data/merchantData';
+import { ensureMarketFresh } from '../market/matching';
 
 const router = Router();
 
@@ -13,6 +14,7 @@ router.get('/requests', requireAuth, async (req: Request, res: Response) => {
   const now = Date.now();
 
   try {
+    await ensureMarketFresh(now);
     let rows: any[];
     if (cities && typeof cities === 'string') {
       const cityList = cities.split(',').filter(Boolean);
@@ -66,6 +68,7 @@ router.post('/bid', requireAuth, marketWriteLimiter, async (req: Request, res: R
     return res.status(400).json({ error: 'Ungültige Parameter' });
 
   try {
+    await ensureMarketFresh(Date.now());
     const [reqRows]: any = await pool.execute(
       'SELECT * FROM market_requests WHERE id = ? AND status = "open" AND expires_at > ?',
       [requestId, Date.now()]

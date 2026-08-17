@@ -5,7 +5,7 @@ vi.mock('../db', () => ({
 }));
 
 import { pool } from '../db';
-import { calcScore, processBids } from './matching';
+import { calcScore, processBids, processHofladenSales } from './matching';
 
 const execute = pool.execute as unknown as ReturnType<typeof vi.fn>;
 
@@ -142,5 +142,73 @@ describe('processBids', () => {
 
     const repUpsert = findCall(/INSERT INTO market_reputation/);
     expect(repUpsert?.[1]).toEqual([1, 'muenchen', 0.5, 0.5]);
+  });
+});
+
+// ── processHofladenSales: rate-based sales out of the offer's own stock ───────
+
+describe('processHofladenSales', () => {
+  const now = 1_000_000;
+  const userId = 7;
+
+  function installReputationMock(score: number) {
+    execute.mockReset();
+    execute.mockImplementation(async (sql: string) => {
+      if (/SELECT score FROM market_reputation/.test(sql)) return [[{ score }]];
+      return [[]];
+    });
+  }
+
+  function baseState(stock: number, pricePerUnit: number) {
+    return {
+      money: 1000,
+      farmMeta: [{ id: 'muenchen', city: 'München' }],
+      farms: { muenchen: { storage: {} } },
+      hofladen: {
+        muenchen: {
+          unlocked: true,
+          offers: [{ productId: 'eggs', pricePerUnit, stock }],
+        },
+      },
+    };
+  }
+
+  it('sells proportionally to elapsed time and reputation-based traffic, crediting money directly', async () => {
+    installReputationMock(10); // traffic = 20 + 10*2 = 40 units/min
+    const state = baseState(100, 0.35); // priced at base -> elasticity 1
+
+    const result = await processHofladenSales(userId, state, 60, now); // 1 minute elapsed
+
+    const offer = result.hofladen.muenchen.offers[0];
+    expect(offer.stock).toBe(60); // 100 - 40 sold
+    expect(result.money).toBe(1000 + Math.round(40 * 0.35));
+  });
+
+  it('never sells more than what is stocked', async () => {
+    installReputationMock(10);
+    const state = baseState(5, 0.35);
+
+    const result = await processHofladenSales(userId, state, 60, now);
+
+    expect(result.hofladen.muenchen.offers[0].stock).toBe(0);
+    expect(result.money).toBe(1000 + Math.round(5 * 0.35));
+  });
+
+  it('grants a reputation bump only when something actually sold', async () => {
+    installReputationMock(10);
+    const state = baseState(100, 0.35);
+
+    await processHofladenSales(userId, state, 60, now);
+    const repUpsert = findCall(/INSERT INTO market_reputation/);
+    expect(repUpsert?.[1]).toEqual([userId, 'muenchen', 1.0, 1.0]);
+  });
+
+  it('does nothing when no time has elapsed or stock is empty', async () => {
+    installReputationMock(10);
+    const state = baseState(0, 0.35);
+
+    const result = await processHofladenSales(userId, state, 60, now);
+    expect(result.money).toBe(1000);
+    expect(execute).not.toHaveBeenCalledWith(expect.stringMatching(/INSERT INTO market_reputation/), expect.anything());
   });
 });

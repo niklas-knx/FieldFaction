@@ -145,7 +145,7 @@ export interface OwnedImplement {
 export interface HofladenOffer {
   productId: string;
   pricePerUnit: number;   // Spieler-gesetzter Preis (max 1.8× Basispreis)
-  limitPerRound: number;  // Einheiten pro 60s-Runde
+  stock: number;          // Eingelagerte Einheiten, physisch getrennt vom Farm-Lager
 }
 
 export interface HofladenConfig {

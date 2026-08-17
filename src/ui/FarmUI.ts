@@ -21,6 +21,7 @@ import {
   freeSpaceUnits, sizeLabel, sizeHa, freeUnitsLabel, processingSpaceUnits,
 } from '../data/processing';
 import type { StallSlot } from '../types';
+import type { TickEvents } from '../farm/Farm';
 import { bus } from '../core/EventBus';
 import {
   apiGetMarketRequests, apiSubmitBid, apiGetMyBids, apiCancelBid,
@@ -89,9 +90,24 @@ export class FarmUI {
       this.state = result.state;
       this.onStateChange(this.state);
       result.notifications.forEach(text => bus.emit('notification', text));
+      this.notifyTickEvents(result.events);
     } catch (err: any) {
       bus.emit('notification', `❌ ${err.message ?? 'Fehler'}`);
     }
+  }
+
+  // Es gibt keinen periodischen Hintergrund-Sync mehr (siehe main.ts) — Ereignisse, die
+  // ohne eigenes Zutun passiert sind (Lieferungen, Kündigungen wegen Lohnrückstand),
+  // kommen stattdessen mit jeder eigenen Aktion zurück und werden hier gemeldet.
+  private notifyTickEvents(events: TickEvents): void {
+    events.deliveriesArrived.forEach(d => {
+      const p = PRODUCTS[d.productId];
+      bus.emit('notification', `🚛 ${formatAmount(d.amount, p?.unit ?? '')} ${p?.name ?? d.productId} angekommen`);
+    });
+    events.employeesFired.forEach(f => {
+      const def = EMPLOYEE_ROLES[f.role];
+      bus.emit('notification', `💸 ${def?.emoji ?? '👤'} ${def?.name ?? f.role} wegen unbezahlter Löhne gekündigt`);
+    });
   }
 
   // Rein kosmetischer "jetzt"-Tick für Fortschrittsbalken/Restzeiten zwischen zwei
@@ -1013,8 +1029,14 @@ export class FarmUI {
             ${offer.pricePerUnit.toFixed(2).replace('.',',')} €/${prod?.unit ?? ''}
             <small class="market-price-good">+${pctAbove}%</small>
           </span>
-          <span class="hofladen-offer-limit">${formatAmount(offer.limitPerRound, prod?.unit ?? '')} /Runde</span>
-          <span class="hofladen-offer-stock">${available > 0 ? formatAmount(available, prod?.unit ?? '') + ' vorrätig' : '<span class="text-muted">kein Lager</span>'}</span>
+          <span class="hofladen-offer-instock">${formatAmount(Math.floor(offer.stock), prod?.unit ?? '')} im Hofladen</span>
+          <span class="hofladen-offer-stock">${available > 0 ? formatAmount(available, prod?.unit ?? '') + ' im Lager' : '<span class="text-muted">Lager leer</span>'}</span>
+          <span class="hofladen-offer-stockform">
+            <input class="order-amount-input hofladen-stock-inp" data-farm="${farmId}" data-idx="${idx}"
+              type="number" min="1" placeholder="Menge" />
+            <button class="btn-icon-sm hofladen-stockin-btn" data-farm="${farmId}" data-idx="${idx}" title="Ins Regal legen">📥</button>
+            <button class="btn-icon-sm hofladen-stockout-btn" data-farm="${farmId}" data-idx="${idx}" title="Zurück ins Lager">📤</button>
+          </span>
           <button class="btn-icon-sm hofladen-remove-btn" data-farm="${farmId}" data-idx="${idx}" title="Entfernen">✕</button>
         </div>`;
       }).join('');
@@ -1036,8 +1058,6 @@ export class FarmUI {
           </select>
           <input class="order-amount-input hofladen-price-inp" data-farm="${farmId}"
             type="number" min="0.01" step="0.01" placeholder="Preis / Einheit" />
-          <input class="order-amount-input hofladen-limit-inp" data-farm="${farmId}"
-            type="number" min="1" placeholder="Limit /Runde" />
           <button class="btn btn-secondary hofladen-add-btn" data-farm="${farmId}">+ Angebot</button>
         </div>
       </div>`;
@@ -1045,7 +1065,9 @@ export class FarmUI {
 
     el.innerHTML = `<div class="market-layout">
       <p class="text-muted" style="font-size:11px;margin-bottom:8px">
-        Kunden kaufen jede Runde (~60s) bis zur Kapazität. Preis-Elastizität: zu hohe Preise senken die Nachfrage.
+        Erst Preis setzen, dann Ware aus dem Lager ins Regal legen (📥) — nur was im
+        Hofladen liegt, kann verkauft werden. Kunden kommen laufend vorbei (mehr bei
+        höherer Reputation); zu hohe Preise senken die Nachfrage.
       </p>
       ${sections}
     </div>`;
@@ -1059,7 +1081,7 @@ export class FarmUI {
       });
     });
 
-    // Angebot entfernen
+    // Angebot entfernen (eingelagerte Ware geht zurück ins Farm-Lager)
     el.querySelectorAll('.hofladen-remove-btn').forEach(btn => {
       btn.addEventListener('click', async () => {
         const farmId = (btn as HTMLElement).dataset.farm!;
@@ -1069,25 +1091,53 @@ export class FarmUI {
       });
     });
 
-    // Angebot hinzufügen
+    // Angebot hinzufügen (nur Preis — Ware wird separat eingelagert)
     el.querySelectorAll('.hofladen-add-btn').forEach(btn => {
       btn.addEventListener('click', async () => {
         const farmId  = (btn as HTMLElement).dataset.farm!;
         const form    = btn.closest('.hofladen-add-form')!;
         const prodSel = form.querySelector('.hofladen-prod-sel') as HTMLSelectElement;
         const priceInp = form.querySelector('.hofladen-price-inp') as HTMLInputElement;
-        const limitInp = form.querySelector('.hofladen-limit-inp') as HTMLInputElement;
 
         const productId    = prodSel.value;
         const pricePerUnit = Number(priceInp.value);
-        const limitPerRound = Number(limitInp.value) || 100;
 
         if (!productId || pricePerUnit <= 0) { bus.emit('notification', '❌ Preis eingeben'); return; }
         const base    = currentPrice(this.state, productId) || 1;
         const maxPrice = base * 1.8;
         if (pricePerUnit > maxPrice) { bus.emit('notification', `❌ Max. ${maxPrice.toFixed(2)} € (1,8× Basispreis)`); return; }
 
-        await this.dispatch('setHofladenOffer', [farmId, productId, pricePerUnit, limitPerRound]);
+        await this.dispatch('setHofladenOffer', [farmId, productId, pricePerUnit]);
+        this.renderMarketHofladenTab(el);
+      });
+    });
+
+    // Ins Regal legen
+    el.querySelectorAll('.hofladen-stockin-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const farmId  = (btn as HTMLElement).dataset.farm!;
+        const idx     = Number((btn as HTMLElement).dataset.idx);
+        const offer   = this.state.hofladen[farmId]?.offers[idx];
+        const row     = btn.closest('.hofladen-offer-row')!;
+        const amtInp  = row.querySelector('.hofladen-stock-inp') as HTMLInputElement;
+        const amount  = Number(amtInp.value);
+        if (!offer || !(amount > 0)) { bus.emit('notification', '❌ Menge eingeben'); return; }
+        await this.dispatch('stockHofladen', [farmId, offer.productId, amount]);
+        this.renderMarketHofladenTab(el);
+      });
+    });
+
+    // Zurück ins Lager
+    el.querySelectorAll('.hofladen-stockout-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const farmId  = (btn as HTMLElement).dataset.farm!;
+        const idx     = Number((btn as HTMLElement).dataset.idx);
+        const offer   = this.state.hofladen[farmId]?.offers[idx];
+        const row     = btn.closest('.hofladen-offer-row')!;
+        const amtInp  = row.querySelector('.hofladen-stock-inp') as HTMLInputElement;
+        const amount  = Number(amtInp.value);
+        if (!offer || !(amount > 0)) { bus.emit('notification', '❌ Menge eingeben'); return; }
+        await this.dispatch('unstockHofladen', [farmId, offer.productId, amount]);
         this.renderMarketHofladenTab(el);
       });
     });
@@ -1116,7 +1166,7 @@ export class FarmUI {
         </div>
         <div class="reputation-effects">
           <span>💰 +${priceBonus}% Preisbonus bei Händlern</span>
-          <span>🏪 ${traffic} Kunden /Runde im Hofladen</span>
+          <span>🏪 ${traffic} Kunden/Min im Hofladen</span>
         </div>
       </div>`;
     }).join('');

@@ -1521,17 +1521,18 @@ kbd {
   padding: 8px 10px; background: var(--surface-2);
   border: 1px solid var(--border); border-radius: var(--radius); font-size: 12px;
 }
-.hofladen-offer-prod  { flex: 1; font-weight: 600; }
-.hofladen-offer-price { color: var(--gold); white-space: nowrap; }
-.hofladen-offer-limit { color: var(--text-muted); white-space: nowrap; }
-.hofladen-offer-stock { color: var(--text-muted); white-space: nowrap; font-size: 11px; }
+.hofladen-offer-prod    { flex: 1; font-weight: 600; }
+.hofladen-offer-price   { color: var(--gold); white-space: nowrap; }
+.hofladen-offer-instock { color: var(--text-muted); white-space: nowrap; }
+.hofladen-offer-stock   { color: var(--text-muted); white-space: nowrap; font-size: 11px; }
+.hofladen-offer-stockform { display: flex; gap: 4px; align-items: center; }
+.hofladen-stock-inp { width: 64px; }
 .hofladen-add-form {
   display: flex; gap: 6px; align-items: center; padding-top: 8px;
   border-top: 1px solid var(--border); flex-wrap: wrap;
 }
 .hofladen-prod-sel  { flex: 1; min-width: 120px; }
 .hofladen-price-inp { width: 90px; }
-.hofladen-limit-inp { width: 80px; }
 
 /* ─── Reputation ─── */
 .reputation-row {

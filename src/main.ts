@@ -4,18 +4,14 @@ import { LandingUI } from './ui/LandingUI';
 import { StartLocationUI } from './ui/StartLocationUI';
 import type { GameState } from './types';
 import type { TickEvents } from './farm/Farm';
-import { PRODUCTS, formatAmount } from './data/products';
-import { EMPLOYEE_ROLES } from './data/employees';
-import { bus } from './core/EventBus';
 import { apiLoadState, apiStartGame, apiVerifyEmail, isLoggedIn, logout, type LoadResult } from './api';
 import './style.css';
 import 'leaflet/dist/leaflet.css';
 
 // Seit Issue #7 ist der Server die alleinige Quelle der Wahrheit für den Spielzustand —
 // der Client erzeugt keine Ticks mehr selbst (kein lokaler tickGame()-Loop, kein
-// Autosave-PUT). Er zeigt nur noch an, was der Server zuletzt berechnet hat, und fragt
-// regelmäßig frischen Stand an bzw. löst Aktionen über FarmUI.dispatch() aus.
-const SYNC_INTERVAL_MS   = 8_000; // frischen, serverseitig fortgeschriebenen Stand holen
+// Autosave-PUT) und fragt auch nicht mehr periodisch von sich aus nach — frischer Stand
+// kommt ausschließlich als Antwort auf eigene Aktionen zurück (siehe FarmUI.dispatch()).
 const RENDER_INTERVAL_MS = 1_000; // rein kosmetischer Re-render-Takt für Fortschrittsbalken
 
 const container = document.getElementById('app')!;
@@ -61,19 +57,6 @@ function buildWelcomeBackSummary(
   };
 }
 
-// Ereignisse aus einem regulären Sync können sofort als Notification raus — anders als
-// beim Offline-Nachholen (ggf. tausende Ticks auf einmal), wo das spammen würde.
-function notifyLiveTickEvents(events: TickEvents): void {
-  events.deliveriesArrived.forEach(d => {
-    const p = PRODUCTS[d.productId];
-    bus.emit('notification', `🚛 ${formatAmount(d.amount, p?.unit ?? '')} ${p?.name ?? d.productId} angekommen`);
-  });
-  events.employeesFired.forEach(f => {
-    const def = EMPLOYEE_ROLES[f.role];
-    bus.emit('notification', `💸 ${def?.emoji ?? '👤'} ${def?.name ?? f.role} wegen unbezahlter Löhne gekündigt`);
-  });
-}
-
 // ── Spiel mit einem bereits geladenen Stand betreten (normaler Login ODER direkt
 // nach Wahl des Startorts) ─────────────────────────────────────────────────────
 function enterGame(result: LoadedResult): void {
@@ -94,21 +77,6 @@ function enterGame(result: LoadedResult): void {
   // Rein kosmetischer Re-render-Takt: aktualisiert Fortschrittsbalken/Restzeiten im
   // Sekundentakt, ohne selbst neuen Spielzustand zu erzeugen.
   setInterval(() => ui.render(state, true), RENDER_INTERVAL_MS);
-
-  // Periodischer Sync: holt den serverseitig fortgeschriebenen Stand (Feldwachstum,
-  // Tierproduktion, Lieferungen, Löhne, gewonnene Markt-Gebote, …) — Dinge, die ohne
-  // eigenes Zutun im Hintergrund passieren.
-  setInterval(async () => {
-    try {
-      const r = await apiLoadState();
-      if (r.isNewGame) return; // sollte nach dem ersten Start nie mehr vorkommen
-      state = r.state;
-      notifyLiveTickEvents(r.events);
-      ui.render(state);
-    } catch (err) {
-      console.warn('[Sync]', err);
-    }
-  }, SYNC_INTERVAL_MS);
 }
 
 // Frisch verifizierter Account ohne Spielstand: Startort wählen lassen, bevor es losgeht.

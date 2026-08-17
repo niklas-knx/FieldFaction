@@ -7,7 +7,7 @@ import {
   designateField, demolishPlot, sellToMerchant,
   startDelivery,
   hireEmployee, moveEmployee, fireEmployee,
-  unlockHofladen, setHofladenOffer, removeHofladenOffer,
+  unlockHofladen, setHofladenOffer, stockHofladen, unstockHofladen, removeHofladenOffer,
 } from '../../../src/farm/Farm';
 
 // Every value-changing action the client used to apply to its own copy of GameState.
@@ -74,8 +74,12 @@ export const GAME_ACTIONS = {
   fireEmployee,
   // farmId
   unlockHofladen,
-  // farmId, productId, pricePerUnit, limitPerRound
+  // farmId, productId, pricePerUnit
   setHofladenOffer,
+  // farmId, productId, amount
+  stockHofladen,
+  // farmId, productId, amount
+  unstockHofladen,
   // farmId, index
   removeHofladenOffer,
 } as const;

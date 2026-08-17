@@ -936,15 +936,20 @@ export function unlockHofladen(state: GameState, farmId: string): GameState {
 
 // Preis wird serverseitig gedeckelt (max 1.8× Basispreis) statt dem Client zu vertrauen —
 // dieselbe Grenze, die FarmUI schon vor dem Absenden prüft, aber hier verbindlich.
+// Setzt/ändert nur den Preis — der Warenbestand wird separat per stockHofladen() eingelagert.
 export function setHofladenOffer(
-  state: GameState, farmId: string, productId: string, pricePerUnit: number, limitPerRound: number,
+  state: GameState, farmId: string, productId: string, pricePerUnit: number,
 ): GameState {
   const config = state.hofladen[farmId];
-  if (!config?.unlocked || !PRODUCTS[productId] || !(pricePerUnit > 0) || !(limitPerRound > 0)) return state;
+  if (!config?.unlocked || !PRODUCTS[productId] || !(pricePerUnit > 0)) return state;
 
   const maxPrice = (currentPrice(state, productId) || 1) * 1.8;
-  const offer = { productId, pricePerUnit: Math.min(pricePerUnit, maxPrice), limitPerRound };
   const existingIdx = config.offers.findIndex(o => o.productId === productId);
+  const offer = {
+    productId,
+    pricePerUnit: Math.min(pricePerUnit, maxPrice),
+    stock: existingIdx >= 0 ? config.offers[existingIdx].stock : 0,
+  };
   const offers = existingIdx >= 0
     ? config.offers.map((o, i) => i === existingIdx ? offer : o)
     : [...config.offers, offer];
@@ -952,11 +957,56 @@ export function setHofladenOffer(
   return { ...state, hofladen: { ...state.hofladen, [farmId]: { ...config, offers } } };
 }
 
-export function removeHofladenOffer(state: GameState, farmId: string, index: number): GameState {
+// Verschiebt Ware vom Farm-Lager in den Hofladen — erst danach kann sie dort verkauft werden.
+export function stockHofladen(state: GameState, farmId: string, productId: string, amount: number): GameState {
+  const farm = state.farms[farmId];
   const config = state.hofladen[farmId];
-  if (!config) return state;
+  if (!farm || !config?.unlocked || !(amount > 0)) return state;
+  const offerIdx = config.offers.findIndex(o => o.productId === productId);
+  if (offerIdx < 0) { bus.emit('notification', '❌ Erst Preis setzen'); return state; }
+
+  const stored = farm.storage[productId] ?? 0;
+  const actual = Math.min(amount, stored);
+  if (actual <= 0) return state;
+
+  const offers = config.offers.map((o, i) => i === offerIdx ? { ...o, stock: o.stock + actual } : o);
   return {
-    ...state,
+    ...updateFarm(state, farmId, { storage: { ...farm.storage, [productId]: stored - actual } }),
+    hofladen: { ...state.hofladen, [farmId]: { ...config, offers } },
+  };
+}
+
+// Umkehrung von stockHofladen — Ware zurück ins Farm-Lager holen.
+export function unstockHofladen(state: GameState, farmId: string, productId: string, amount: number): GameState {
+  const farm = state.farms[farmId];
+  const config = state.hofladen[farmId];
+  if (!farm || !config || !(amount > 0)) return state;
+  const offerIdx = config.offers.findIndex(o => o.productId === productId);
+  if (offerIdx < 0) return state;
+
+  const offer = config.offers[offerIdx];
+  const actual = Math.min(amount, offer.stock);
+  if (actual <= 0) return state;
+
+  const offers = config.offers.map((o, i) => i === offerIdx ? { ...o, stock: o.stock - actual } : o);
+  const stored = farm.storage[productId] ?? 0;
+  return {
+    ...updateFarm(state, farmId, { storage: { ...farm.storage, [productId]: stored + actual } }),
+    hofladen: { ...state.hofladen, [farmId]: { ...config, offers } },
+  };
+}
+
+export function removeHofladenOffer(state: GameState, farmId: string, index: number): GameState {
+  const farm = state.farms[farmId];
+  const config = state.hofladen[farmId];
+  if (!farm || !config) return state;
+  const offer = config.offers[index];
+  if (!offer) return state;
+
+  // Eingelagerte Ware geht beim Entfernen nicht verloren, sondern geht zurück ins Farm-Lager.
+  const stored = farm.storage[offer.productId] ?? 0;
+  return {
+    ...updateFarm(state, farmId, { storage: { ...farm.storage, [offer.productId]: stored + offer.stock } }),
     hofladen: { ...state.hofladen, [farmId]: { ...config, offers: config.offers.filter((_, i) => i !== index) } },
   };
 }

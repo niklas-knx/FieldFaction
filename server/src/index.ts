@@ -7,7 +7,6 @@ import { testConnection, initTables, migrateUsersTable } from './db';
 import authRoutes from './routes/auth';
 import gameRoutes from './routes/game';
 import marketRoutes from './routes/market';
-import { runMatchingRound } from './market/matching';
 
 dotenv.config();
 
@@ -18,7 +17,6 @@ const PORT = Number(process.env.PORT ?? 3001);
 // X-Forwarded-For nur, wenn die Verbindung selbst von 127.0.0.1 kommt, siehe
 // https://express-rate-limit.github.io/ERR_ERL_UNEXPECTED_X_FORWARDED_FOR/
 app.set('trust proxy', 'loopback');
-const MATCHING_INTERVAL_MS = 60_000; // 60 Sekunden
 
 // ── Middleware ────────────────────────────────────────────────────────────────
 app.use(helmet({
@@ -61,12 +59,6 @@ async function main() {
   } catch (e: any) {
     console.warn('[DB] migrateUsersTable übersprungen:', e.sqlMessage ?? e.message);
   }
-
-  // Markt-Matching alle 60 Sekunden
-  setInterval(() => {
-    runMatchingRound().catch(err => console.error('[Market] Unhandled error:', err));
-  }, MATCHING_INTERVAL_MS);
-  console.log(`[Market] Matching-Loop gestartet (alle ${MATCHING_INTERVAL_MS / 1000}s)`);
 
   app.listen(PORT, () => console.log(`[Server] läuft auf http://localhost:${PORT}`));
 }

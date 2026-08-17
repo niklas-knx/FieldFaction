@@ -1,9 +1,9 @@
 import { pool } from '../db';
 import { CITY_MERCHANTS, getMerchantPrice, getMerchantDemand, BASE_PRICES, MERCHANT_DEMAND, CITY_PROFILES } from '../data/merchantData';
 
-const MATCHING_INTERVAL_MS = 60_000;
 const MAX_REQUESTS_PER_CITY = 8;
 const REQUEST_LIFETIME_MS   = 5 * 60 * 1000; // 5 Minuten
+const MIN_SWEEP_GAP_MS      = 5_000; // Drosselung gegen redundante DB-Last bei Request-Bursts
 
 // Mengen-Spanne pro Produkt (min, max)
 const QTY_RANGE: Record<string, [number, number]> = {
@@ -56,16 +56,28 @@ export function calcScore(reputation: number, pricePerUnit: number, maxPrice: nu
 
 // ── 1. Neue Kundenanfragen generieren ─────────────────────────────────────────
 
+// Ersetzt den früheren festen 60s-Rundentakt: pro Stadt wird gemerkt, wann zuletzt
+// generiert wurde, und die Menge wird proportional zur seit dann vergangenen Realzeit
+// berechnet (profile.requestsPerRound pro Minute). Bleibt < 1 Anfrage "angespart", wird
+// lastGenAt bewusst NICHT vorgerückt, damit die Zeit weiter aufläuft statt zu verfallen.
+const lastGenAt: Record<string, number> = {};
+
 async function generateRequests(now: number): Promise<void> {
   for (const [city, merchantIds] of Object.entries(CITY_MERCHANTS)) {
     const profile = CITY_PROFILES[city] ?? { priceMultiplier: 1.0, requestsPerRound: 3, quantityMultiplier: 1.0 };
+
+    const prevAt = lastGenAt[city] ?? now;
+    const elapsedMs = now - prevAt;
+    const wanted = Math.floor((profile.requestsPerRound * elapsedMs) / 60_000);
+    if (wanted <= 0) continue;
+    lastGenAt[city] = now;
 
     const [countRow]: any = await pool.execute(
       'SELECT COUNT(*) AS cnt FROM market_requests WHERE city = ? AND status = "open" AND expires_at > ?',
       [city, now]
     );
     const existing  = Number(countRow[0]?.cnt ?? 0);
-    const toGenerate = Math.min(profile.requestsPerRound, MAX_REQUESTS_PER_CITY - existing);
+    const toGenerate = Math.min(wanted, MAX_REQUESTS_PER_CITY - existing);
     if (toGenerate <= 0) continue;
 
     for (let i = 0; i < toGenerate; i++) {
@@ -170,72 +182,76 @@ export async function processBids(now: number): Promise<void> {
   }
 }
 
-// ── 3. Hofladen (unverändert) ─────────────────────────────────────────────────
+// ── 3. Hofladen ────────────────────────────────────────────────────────────────
 
-async function processHofladen(now: number): Promise<void> {
-  const [stateRows]: any = await pool.execute(
-    'SELECT user_id, state_json FROM game_states'
-  );
+// Läuft nicht mehr als eigener Hintergrund-Tick über alle Spieler, sondern wird pro
+// Nutzer synchron beim Laden/Fortschreiben des eigenen Spielstands aufgerufen (siehe
+// loadAndAdvance() in routes/game.ts), mit demselben elapsedSeconds wie advanceState().
+// Verkauft aus offer.stock (nicht mehr aus farm.storage) und schreibt den Erlös direkt
+// in state.money — der market_credits-Umweg entfällt hier, weil die Berechnung jetzt
+// innerhalb der Request des betroffenen Spielers passiert statt in einem entkoppelten
+// Hintergrundprozess.
+export async function processHofladenSales(
+  userId: number, state: any, elapsedSeconds: number, now: number,
+): Promise<any> {
+  if (!state?.hofladen || typeof state.hofladen !== 'object' || elapsedSeconds <= 0) return state;
 
-  for (const row of stateRows) {
-    try {
-      const state = JSON.parse(row.state_json);
-      if (!state.hofladen || typeof state.hofladen !== 'object') continue;
+  let s = state;
+  let totalEarned = 0;
 
-      for (const [farmId, config] of Object.entries(state.hofladen as Record<string, any>)) {
-        if (!config.unlocked || !Array.isArray(config.offers) || config.offers.length === 0) continue;
+  for (const [farmId, config] of Object.entries(state.hofladen as Record<string, any>)) {
+    if (!config?.unlocked || !Array.isArray(config.offers) || config.offers.length === 0) continue;
 
-        const meta = (state.farmMeta as any[])?.find((m: any) => m.id === farmId);
-        if (!meta) continue;
-        const cityId = farmId.includes('_') && /\d{10,}$/.test(farmId)
-          ? farmId.replace(/_\d+$/, '') : farmId;
+    const meta = (state.farmMeta as any[])?.find((m: any) => m.id === farmId);
+    if (!meta) continue;
+    const cityId = farmId.includes('_') && /\d{10,}$/.test(farmId)
+      ? farmId.replace(/_\d+$/, '') : farmId;
 
-        const rep     = await getReputation(row.user_id, cityId);
-        const traffic = Math.floor(20 + rep * 2);
-        const farm    = state.farms?.[farmId];
-        if (!farm?.storage) continue;
+    const rep             = await getReputation(userId, cityId);
+    const trafficPerMinute = 20 + rep * 2;
 
-        const changes: { farmId: string; productId: string; amount: number }[] = [];
-        let totalEarned = 0;
+    let farmEarned = 0;
+    const offers = config.offers.map((offer: any) => {
+      const { productId, pricePerUnit, stock } = offer;
+      if (!(stock > 0) || !(pricePerUnit > 0)) return offer;
 
-        for (const offer of config.offers) {
-          const { productId, pricePerUnit, limitPerRound } = offer;
-          const available = Math.floor(farm.storage[productId] ?? 0);
-          if (available <= 0 || pricePerUnit <= 0) continue;
+      const basePrc = BASE_PRICES[productId] ?? 0;
+      if (basePrc <= 0) return offer;
+      const ratio      = pricePerUnit / basePrc;
+      const elasticity = Math.max(0.05, 1 - Math.max(0, ratio - 1.2) * 2);
+      const sellable   = Math.floor(trafficPerMinute * (elapsedSeconds / 60) * elasticity);
+      const sold       = Math.min(Math.floor(stock), sellable);
+      if (sold <= 0) return offer;
 
-          const basePrc    = BASE_PRICES[productId] ?? 0;
-          if (basePrc <= 0) continue;
-          const ratio      = pricePerUnit / basePrc;
-          const elasticity = Math.max(0.05, 1 - Math.max(0, ratio - 1.2) * 2);
-          const cap        = Math.min(limitPerRound ?? traffic, Math.floor(traffic * elasticity));
-          const sold       = Math.min(available, cap);
-          if (sold <= 0) continue;
+      farmEarned += Math.round(sold * pricePerUnit);
+      return { ...offer, stock: stock - sold };
+    });
 
-          totalEarned += Math.round(sold * pricePerUnit);
-          changes.push({ farmId, productId, amount: -sold });
-        }
-
-        if (totalEarned > 0) {
-          await createCredit(row.user_id, totalEarned, changes, `Hofladen · ${meta.city}`, now);
-          await upsertReputation(row.user_id, cityId, 1.0);
-        }
-      }
-    } catch (e) {
-      console.error(`[Market] Hofladen-Fehler user=${row.user_id}:`, e);
+    if (farmEarned > 0) {
+      totalEarned += farmEarned;
+      s = { ...s, hofladen: { ...s.hofladen, [farmId]: { ...config, offers } } };
+      await upsertReputation(userId, cityId, 1.0);
     }
   }
+
+  if (totalEarned <= 0) return s;
+  return { ...s, money: s.money + totalEarned };
 }
 
 // ── Haupt-Einstiegspunkt ──────────────────────────────────────────────────────
 
-export async function runMatchingRound(): Promise<void> {
-  const now = Date.now();
+// Ersetzt den früheren 60s-setInterval: wird bei Gelegenheit (Spieler-Aktion, State-Load,
+// Markt-Tab geöffnet) aufgerufen und generiert/matched nur, wenn seit dem letzten Sweep
+// genug Realzeit vergangen ist — kein eigener Hintergrund-Timer mehr im Prozess.
+let lastSweepAt = 0;
+
+export async function ensureMarketFresh(now: number = Date.now()): Promise<void> {
+  if (now - lastSweepAt < MIN_SWEEP_GAP_MS) return;
+  lastSweepAt = now;
   try {
     await generateRequests(now);
     await processBids(now);
-    await processHofladen(now);
-    console.log(`[Market] Runde um ${new Date(now).toLocaleTimeString('de-DE')}`);
   } catch (err) {
-    console.error('[Market] Fehler:', err);
+    console.error('[Market] ensureMarketFresh Fehler:', err);
   }
 }
