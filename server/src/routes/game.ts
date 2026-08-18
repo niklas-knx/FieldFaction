@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { pool } from '../db';
+import type { PoolConnection } from 'mysql2/promise';
 import { requireAuth } from '../middleware/auth';
 import { validateGameStateShape } from '../game/validateState';
 import {
@@ -18,17 +19,43 @@ const MAX_CATCHUP_TICKS = 7 * 24 * 60 * 60; // max 7 Tage Nachholzeit pro Sync
 // sondern der erwartete Zustand direkt nach der Registrierung, bevor der Client per
 // POST /start einen Startort gewählt hat.
 class NoGameYetError extends Error {}
+class BadStartRequestError extends Error {}
+class InvalidStateError extends Error {}
 
-async function loadStateRow(userId: number): Promise<{ state_json: string; last_saved_at: number } | null> {
-  const [rows]: any = await pool.execute(
-    'SELECT state_json, save_version, last_saved_at FROM game_states WHERE user_id = ? AND save_version = ?',
+// Serialisiert den kompletten Lade-Ändere-Speichere-Zyklus pro Nutzer. Ohne das könnten
+// zwei nahezu gleichzeitige Requests desselben Accounts (z.B. zwei offene Geräte/Tabs)
+// beide denselben Stand lesen, bevor der jeweils andere seine Änderung gespeichert hat —
+// und Ergebnisse doppelt gutschreiben (z.B. denselben Stall-Ertrag zweimal einlagern).
+// SELECT ... FOR UPDATE hält innerhalb der Transaktion einen Zeilen-Lock bis zum COMMIT;
+// ein zweiter Request für denselben user_id wartet an genau dieser Stelle, statt mit
+// veralteten Daten weiterzurechnen.
+async function withUserLock<T>(userId: number, fn: (conn: PoolConnection) => Promise<T>): Promise<T> {
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const result = await fn(conn);
+    await conn.commit();
+    return result;
+  } catch (err) {
+    await conn.rollback();
+    throw err;
+  } finally {
+    conn.release();
+  }
+}
+
+async function loadStateRow(
+  conn: PoolConnection, userId: number
+): Promise<{ state_json: string; last_saved_at: number } | null> {
+  const [rows]: any = await conn.execute(
+    'SELECT state_json, save_version, last_saved_at FROM game_states WHERE user_id = ? AND save_version = ? FOR UPDATE',
     [userId, SAVE_VERSION]
   );
   return rows[0] ?? null;
 }
 
-async function persist(userId: number, state: unknown, now: number): Promise<void> {
-  await pool.execute(
+async function persist(conn: PoolConnection, userId: number, state: unknown, now: number): Promise<void> {
+  await conn.execute(
     `INSERT INTO game_states (user_id, save_version, state_json, last_saved_at)
      VALUES (?, ?, ?, ?)
      ON DUPLICATE KEY UPDATE
@@ -39,13 +66,14 @@ async function persist(userId: number, state: unknown, now: number): Promise<voi
   );
 }
 
-// Gewonnene Markt-Gebote/Hofladen-Verkäufe (server-seitig async in market_credits
-// gesammelt, siehe server/src/market/matching.ts) direkt in den Spielstand einbuchen,
-// statt wie früher den Client per Polling lokal rechnen und "als angewendet markieren"
-// zu lassen — der Client hat keine Schreibrechte auf den State mehr, also muss der
-// Server das selbst erledigen, sobald er den Stand ohnehin lädt.
-async function applyPendingCredits(userId: number, state: any): Promise<any> {
-  const [rows]: any = await pool.execute(
+// Gewonnene Markt-Gebote (server-seitig async in market_credits gesammelt, siehe
+// server/src/market/matching.ts) direkt in den Spielstand einbuchen, statt wie früher den
+// Client per Polling lokal rechnen und "als angewendet markieren" zu lassen — der Client
+// hat keine Schreibrechte auf den State mehr, also muss der Server das selbst erledigen,
+// sobald er den Stand ohnehin lädt. Läuft in derselben Transaktion/Sperre wie der Rest des
+// Lade-Zyklus, damit zwei gleichzeitige Requests nicht dieselben Credits doppelt einbuchen.
+async function applyPendingCredits(conn: PoolConnection, userId: number, state: any): Promise<any> {
+  const [rows]: any = await conn.execute(
     'SELECT id, amount_eur, product_changes_json, description FROM market_credits WHERE user_id = ? AND applied = 0',
     [userId]
   );
@@ -63,7 +91,7 @@ async function applyPendingCredits(userId: number, state: any): Promise<any> {
 
   const ids = rows.map((r: any) => r.id);
   const placeholders = ids.map(() => '?').join(',');
-  await pool.execute(
+  await conn.execute(
     `UPDATE market_credits SET applied = 1 WHERE user_id = ? AND id IN (${placeholders})`,
     [userId, ...ids]
   );
@@ -75,19 +103,22 @@ async function applyPendingCredits(userId: number, state: any): Promise<any> {
 // per advanceState() bis zum aktuellen Zeitpunkt weiterlaufen — die einzige Stelle, an
 // der überhaupt Ticks entstehen. Wirft NoGameYetError, wenn der Account noch keinen
 // Startort gewählt hat (siehe POST /start). Persistiert hier bewusst NICHT: Aufrufer
-// entscheiden selbst, mit welchem Endergebnis gespeichert wird.
-async function loadAndAdvance(userId: number, now: number) {
+// entscheiden selbst, mit welchem Endergebnis gespeichert wird — muss innerhalb derselben
+// withUserLock-Transaktion aufgerufen werden wie der anschließende persist()-Call.
+async function loadAndAdvance(conn: PoolConnection, userId: number, now: number) {
   // Ersetzt den früheren 60s-Server-Tick für Händler-Anfragen/Gebote: generiert/matched
   // nur, wenn seit dem letzten Sweep (über alle Spieler hinweg) genug Zeit vergangen ist.
+  // Betrifft eine geteilte, nicht user-spezifische Ressource — bewusst außerhalb des
+  // Zeilen-Locks oben, um andere Nutzer nicht unnötig zu blockieren.
   await ensureMarketFresh(now);
 
-  const row = await loadStateRow(userId);
+  const row = await loadStateRow(conn, userId);
   if (!row) throw new NoGameYetError();
 
   let state: any = JSON.parse(row.state_json);
   const lastSavedAt = Number(row.last_saved_at);
 
-  state = await applyPendingCredits(userId, state);
+  state = await applyPendingCredits(conn, userId, state);
 
   const elapsedSeconds = Math.max(0, (now - lastSavedAt) / 1000);
   const cappedElapsedSeconds = Math.min(elapsedSeconds, MAX_CATCHUP_TICKS);
@@ -124,9 +155,12 @@ router.get('/state', requireAuth, async (req: Request, res: Response) => {
   const userId = req.user!.userId;
   try {
     const now = Date.now();
-    const { state, events, offlineSeconds, previousMarketPrices } = await loadAndAdvance(userId, now);
-    await persist(userId, state, now);
-    return res.json({ newGame: false, state, events, offlineSeconds, previousMarketPrices });
+    const loaded = await withUserLock(userId, async conn => {
+      const result = await loadAndAdvance(conn, userId, now);
+      await persist(conn, userId, result.state, now);
+      return result;
+    });
+    return res.json({ newGame: false, ...loaded });
   } catch (err) {
     if (err instanceof NoGameYetError) {
       return res.json({ newGame: true });
@@ -143,40 +177,46 @@ router.get('/state', requireAuth, async (req: Request, res: Response) => {
 // zurückgegeben, statt den Fortschritt zu überschreiben.
 router.post('/start', requireAuth, async (req: Request, res: Response) => {
   const userId = req.user!.userId;
+  const now = Date.now();
   try {
-    const now = Date.now();
-    const existingRow = await loadStateRow(userId);
+    const result = await withUserLock(userId, async conn => {
+      const existingRow = await loadStateRow(conn, userId);
+      if (existingRow) {
+        const loaded = await loadAndAdvance(conn, userId, now);
+        await persist(conn, userId, loaded.state, now);
+        return loaded;
+      }
 
-    if (existingRow) {
-      const { state, events, offlineSeconds, previousMarketPrices } = await loadAndAdvance(userId, now);
-      await persist(userId, state, now);
-      return res.json({ newGame: false, state, events, offlineSeconds, previousMarketPrices });
-    }
+      const { city, farmName, lat, lon } = req.body ?? {};
+      if (typeof city !== 'string' || !city.trim()) {
+        throw new BadStartRequestError('Stadt erforderlich');
+      }
+      if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) {
+        throw new BadStartRequestError('Ungültige Koordinaten');
+      }
+      const trimmedCity = city.trim();
+      const name = typeof farmName === 'string' && farmName.trim() ? farmName.trim() : `Gut ${trimmedCity}`;
+      const start: StartLocationInput = { id: slugifyCityId(trimmedCity), name, city: trimmedCity, lat, lon };
 
-    const { city, farmName, lat, lon } = req.body ?? {};
-    if (typeof city !== 'string' || !city.trim()) {
-      return res.status(400).json({ error: 'Stadt erforderlich' });
-    }
-    if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) {
-      return res.status(400).json({ error: 'Ungültige Koordinaten' });
-    }
-    const trimmedCity = city.trim();
-    const name = typeof farmName === 'string' && farmName.trim() ? farmName.trim() : `Gut ${trimmedCity}`;
-    const start: StartLocationInput = { id: slugifyCityId(trimmedCity), name, city: trimmedCity, lat, lon };
+      const state = createInitialState(start);
+      const shape = validateGameStateShape(state);
+      if (!shape.valid) {
+        console.error(`[game/start] Ungültiger initialer Zustand: ${shape.reason}`);
+        throw new InvalidStateError(shape.reason ?? 'unbekannt');
+      }
 
-    const state = createInitialState(start);
-    const shape = validateGameStateShape(state);
-    if (!shape.valid) {
-      console.error(`[game/start] Ungültiger initialer Zustand: ${shape.reason}`);
+      await persist(conn, userId, state, now);
+      return { state, events: emptyTickEvents(), offlineSeconds: 0, previousMarketPrices: state.marketPrices };
+    });
+
+    return res.json({ newGame: false, ...result });
+  } catch (err) {
+    if (err instanceof BadStartRequestError) {
+      return res.status(400).json({ error: err.message });
+    }
+    if (err instanceof InvalidStateError) {
       return res.status(500).json({ error: 'Serverfehler' });
     }
-
-    await persist(userId, state, now);
-    return res.json({
-      newGame: false, state, events: emptyTickEvents(), offlineSeconds: 0,
-      previousMarketPrices: state.marketPrices,
-    });
-  } catch (err) {
     console.error('[game/start POST]', err);
     return res.status(500).json({ error: 'Serverfehler' });
   }
@@ -198,38 +238,45 @@ router.post('/action', requireAuth, async (req: Request, res: Response) => {
     return res.status(400).json({ error: 'args muss ein Array sein' });
   }
 
+  const notifications: string[] = [];
   try {
     const now = Date.now();
-    const { state: advanced, events } = await loadAndAdvance(userId, now);
+    const { result, events } = await withUserLock(userId, async conn => {
+      const { state: advanced, events } = await loadAndAdvance(conn, userId, now);
 
-    // Farm.ts-Aktionen melden Ablehnungsgründe (kein Geld, keine freie Maschine, …) per
-    // EventBus-Notification statt Rückgabewert — kurz mitlesen statt alle ~26 Funktionen
-    // auf ein strukturiertes Fehlerformat umzuschreiben.
-    const notifications: string[] = [];
-    const unsubscribe = bus.on<string>('notification', text => notifications.push(text));
-    let result: unknown;
-    try {
-      // GAME_ACTIONS is a union of differently-shaped pure reducers; the dispatcher is
-      // inherently dynamic (type name comes from the request body), so the exact
-      // parameter tuple can't be statically verified here — the individual functions
-      // guard their own preconditions (see actions.ts comments for expected arg order).
-      const action = GAME_ACTIONS[type] as (...fnArgs: any[]) => unknown;
-      result = action(advanced, ...(Array.isArray(args) ? args : []));
-    } finally {
-      unsubscribe();
-    }
+      // Farm.ts-Aktionen melden Ablehnungsgründe (kein Geld, keine freie Maschine, …) per
+      // EventBus-Notification statt Rückgabewert — kurz mitlesen statt alle ~26 Funktionen
+      // auf ein strukturiertes Fehlerformat umzuschreiben.
+      const unsubscribe = bus.on<string>('notification', text => notifications.push(text));
+      let result: unknown;
+      try {
+        // GAME_ACTIONS is a union of differently-shaped pure reducers; the dispatcher is
+        // inherently dynamic (type name comes from the request body), so the exact
+        // parameter tuple can't be statically verified here — the individual functions
+        // guard their own preconditions (see actions.ts comments for expected arg order).
+        const action = GAME_ACTIONS[type] as (...fnArgs: any[]) => unknown;
+        result = action(advanced, ...(Array.isArray(args) ? args : []));
+      } finally {
+        unsubscribe();
+      }
 
-    const shape = validateGameStateShape(result);
-    if (!shape.valid) {
-      console.error(`[game/action] Ungültiger Zustand nach "${type}" für user=${userId}: ${shape.reason}`);
-      return res.status(500).json({ error: 'Serverfehler' });
-    }
+      const shape = validateGameStateShape(result);
+      if (!shape.valid) {
+        console.error(`[game/action] Ungültiger Zustand nach "${type}" für user=${userId}: ${shape.reason}`);
+        throw new InvalidStateError(shape.reason ?? 'unbekannt');
+      }
 
-    await persist(userId, result, now);
+      await persist(conn, userId, result, now);
+      return { result, events };
+    });
+
     return res.json({ state: result, events, notifications });
   } catch (err) {
     if (err instanceof NoGameYetError) {
       return res.status(409).json({ error: 'Noch kein Spielstand — zuerst einen Startort wählen' });
+    }
+    if (err instanceof InvalidStateError) {
+      return res.status(500).json({ error: 'Serverfehler' });
     }
     console.error('[game/action POST]', err);
     return res.status(500).json({ error: 'Serverfehler' });

@@ -25,7 +25,7 @@ import type { TickEvents } from '../farm/Farm';
 import { bus } from '../core/EventBus';
 import {
   apiGetMarketRequests, apiSubmitBid, apiGetMyBids, apiCancelBid,
-  apiGetReputation, apiDispatchAction,
+  apiGetReputation, apiDispatchAction, apiLoadState,
 } from '../api';
 import { CITY_PROFILES } from '../data/cityProfiles';
 
@@ -93,6 +93,24 @@ export class FarmUI {
       this.notifyTickEvents(result.events);
     } catch (err: any) {
       bus.emit('notification', `❌ ${err.message ?? 'Fehler'}`);
+    }
+  }
+
+  // Tab-Wechsel (Nav-Klicks) sind rein clientseitig und ändern für sich genommen nichts
+  // am Server-Stand — Produktion (Ställe, Felder, …) läuft server-seitig aber kontinuierlich
+  // weiter. Ohne periodischen Hintergrund-Sync (siehe main.ts) würde die Anzeige sonst erst
+  // beim nächsten Klick auf einen echten Aktions-Button auffrischen. Rendert deshalb erst
+  // sofort mit dem noch vorhandenen Stand (kein Warten/Ruckeln beim Tab-Wechsel), holt dann
+  // im Hintergrund den aktuellen Stand nach und rendert bei Bedarf erneut.
+  private async refreshState(): Promise<void> {
+    try {
+      const r = await apiLoadState();
+      if (r.isNewGame) return;
+      this.state = r.state;
+      this.onStateChange(this.state);
+      this.notifyTickEvents(r.events);
+    } catch (err) {
+      console.warn('[Refresh]', err);
     }
   }
 
@@ -381,6 +399,7 @@ export class FarmUI {
       this.currentView = 'farm';
       this.onStateChange(this.state);
       this.render(this.state);
+      this.refreshState();
     }));
     el.querySelectorAll('[data-nav-unlock]').forEach(b => b.addEventListener('click', async () => {
       await this.dispatch('unlockFarm', [(b as HTMLElement).dataset.navUnlock!]);
@@ -400,30 +419,37 @@ export class FarmUI {
     document.getElementById('nav-karte-btn')?.addEventListener('click', () => {
       this.currentView = this.currentView === 'map' ? 'farm' : 'map';
       this.render(this.state);
+      this.refreshState();
     });
     document.getElementById('nav-vehicles-btn')?.addEventListener('click', () => {
       this.currentView = this.currentView === 'vehicles' ? 'farm' : 'vehicles';
       this.render(this.state);
+      this.refreshState();
     });
     document.getElementById('nav-market-btn')?.addEventListener('click', () => {
       this.currentView = this.currentView === 'market' ? 'farm' : 'market';
       this.render(this.state);
+      this.refreshState();
     });
     document.getElementById('nav-prices-btn')?.addEventListener('click', () => {
       this.currentView = this.currentView === 'prices' ? 'farm' : 'prices';
       this.render(this.state);
+      this.refreshState();
     });
     document.getElementById('nav-logistics-btn')?.addEventListener('click', () => {
       this.currentView = this.currentView === 'logistics' ? 'farm' : 'logistics';
       this.render(this.state);
+      this.refreshState();
     });
     document.getElementById('nav-employees-btn')?.addEventListener('click', () => {
       this.currentView = this.currentView === 'employees' ? 'farm' : 'employees';
       this.render(this.state);
+      this.refreshState();
     });
     document.getElementById('nav-processing-btn')?.addEventListener('click', () => {
       this.currentView = this.currentView === 'processing' ? 'farm' : 'processing';
       this.render(this.state);
+      this.refreshState();
     });
   }
 
@@ -556,10 +582,10 @@ export class FarmUI {
     el.appendChild(fleetEl);
 
     fleetEl.querySelectorAll('.fleet-shop-link, .fleet-shop-link-2').forEach(a => {
-      a.addEventListener('click', e => { e.preventDefault(); this.currentView = 'vehicles'; this.render(this.state); });
+      a.addEventListener('click', e => { e.preventDefault(); this.currentView = 'vehicles'; this.render(this.state); this.refreshState(); });
     });
     fleetEl.querySelectorAll('.fleet-hire-link').forEach(a => {
-      a.addEventListener('click', e => { e.preventDefault(); this.currentView = 'employees'; this.render(this.state); });
+      a.addEventListener('click', e => { e.preventDefault(); this.currentView = 'employees'; this.render(this.state); this.refreshState(); });
     });
     fleetEl.querySelectorAll('[data-vehicle-uid]').forEach(sel => {
       sel.addEventListener('change', async () => {
@@ -1262,6 +1288,7 @@ export class FarmUI {
           this.onStateChange(this.state);
           this.currentView = 'farm';
           this.render(this.state);
+          this.refreshState();
         });
       } else if (canBuy) {
         marker.on('click', async () => {
@@ -2251,10 +2278,10 @@ export class FarmUI {
       </div>`;
 
     document.getElementById('logi-shop-link')?.addEventListener('click', e => {
-      e.preventDefault(); this.currentView = 'vehicles'; this.render(this.state);
+      e.preventDefault(); this.currentView = 'vehicles'; this.render(this.state); this.refreshState();
     });
     document.getElementById('logi-hire-link')?.addEventListener('click', e => {
-      e.preventDefault(); this.currentView = 'employees'; this.render(this.state);
+      e.preventDefault(); this.currentView = 'employees'; this.render(this.state); this.refreshState();
     });
     document.getElementById('logi-from')?.addEventListener('change', e => {
       this.deliveryFromFarmId = (e.target as HTMLSelectElement).value;
@@ -2519,6 +2546,7 @@ export class FarmUI {
         this.onStateChange(this.state);
         this.currentView = 'farm';
         this.render(this.state);
+        this.refreshState();
       });
     });
   }

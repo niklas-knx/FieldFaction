@@ -2,7 +2,20 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import express from 'express';
 import request from 'supertest';
 
-vi.mock('../db', () => ({ pool: { execute: vi.fn() } }));
+// getConnection() returns a fake connection whose execute() is the SAME mock fn as
+// pool.execute — so existing SQL-pattern mocking below (installSavedState etc.) keeps
+// working unchanged, transactions are just no-ops in this in-memory test double.
+vi.mock('../db', () => {
+  const execute = vi.fn();
+  const conn = {
+    execute,
+    beginTransaction: vi.fn(async () => {}),
+    commit: vi.fn(async () => {}),
+    rollback: vi.fn(async () => {}),
+    release: vi.fn(() => {}),
+  };
+  return { pool: { execute, getConnection: vi.fn(async () => conn) } };
+});
 vi.mock('../middleware/auth', () => ({
   requireAuth: (req: any, _res: any, next: any) => {
     req.user = { userId: 1, username: 'tester' };
@@ -92,6 +105,32 @@ describe('POST /api/game/action', () => {
     expect(res.status).toBe(400);
     const insertCall = execute.mock.calls.find((c: any[]) => /INSERT INTO game_states/.test(c[0]));
     expect(insertCall).toBeFalsy();
+  });
+
+  it('wraps the whole load-apply-persist cycle in a single transaction (regression: double-collect race)', async () => {
+    // Zwei nahezu gleichzeitige Requests desselben Nutzers (z.B. zwei Geräte) dürfen nicht
+    // beide denselben Stand lesen, bevor der jeweils andere committet hat — sonst könnten
+    // beide z.B. denselben Stall-Ertrag einlagern. Da hier die DB gemockt ist, prüft dieser
+    // Test nur die Verdrahtung (BEGIN/COMMIT je Aktion), nicht die echte MySQL-Zeilensperre.
+    const saved = createInitialState();
+    saved.farms.muenchen.plots[0].fieldState = 'fallow';
+    installSavedState(saved, Date.now());
+
+    const conn = await (pool.getConnection as unknown as () => Promise<any>)();
+    conn.beginTransaction.mockClear();
+    conn.commit.mockClear();
+    conn.rollback.mockClear();
+    conn.release.mockClear();
+
+    const res = await request(buildApp())
+      .post('/api/game/action')
+      .send({ type: 'tillPlot', args: ['muenchen', 0] });
+
+    expect(res.status).toBe(200);
+    expect(conn.beginTransaction).toHaveBeenCalledTimes(1);
+    expect(conn.commit).toHaveBeenCalledTimes(1);
+    expect(conn.rollback).not.toHaveBeenCalled();
+    expect(conn.release).toHaveBeenCalledTimes(1);
   });
 
   it('applies an allowed action server-side and persists the result', async () => {
