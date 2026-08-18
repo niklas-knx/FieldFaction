@@ -117,12 +117,15 @@ async function loadAndAdvance(conn: PoolConnection, userId: number, now: number)
 
   let state: any = JSON.parse(row.state_json);
   const lastSavedAt = Number(row.last_saved_at);
+  const startMoney  = state.money;
 
   state = await applyPendingCredits(conn, userId, state);
+  const moneyAfterCredits = state.money;
 
   const elapsedSeconds = Math.max(0, (now - lastSavedAt) / 1000);
   const cappedElapsedSeconds = Math.min(elapsedSeconds, MAX_CATCHUP_TICKS);
   const { state: advanced, events } = advanceState(state, elapsedSeconds, MAX_CATCHUP_TICKS);
+  const moneyAfterTicks = advanced.money;
 
   // Hofladen-Verkäufe: kein eigener Tick mehr, sondern hier mit demselben (gedeckelten)
   // Zeitfenster wie advanceState() nachgerechnet — siehe processHofladenSales().
@@ -136,6 +139,16 @@ async function loadAndAdvance(conn: PoolConnection, userId: number, now: number)
   }
 
   return {
+    // Geldveränderung seit dem letzten Speichern, aufgeschlüsselt nach Quelle — fürs
+    // "Willkommen zurück"-Popup (siehe main.ts/FarmUI.ts), das Statistik-Panels in der
+    // Sidebar ersetzt: statt einer Lebenszeit-Summe zeigt der Client lieber, was konkret
+    // während der Abwesenheit passiert ist. `total` ist ein reiner Vorher/Nachher-Diff,
+    // bleibt also auch dann korrekt, wenn tickGame() künftig weitere Geldquellen bekommt.
+    earnings: {
+      total: withHofladen.money - startMoney,
+      credits: moneyAfterCredits - startMoney,
+      hofladen: withHofladen.money - moneyAfterTicks,
+    },
     state: withHofladen,
     events,
     offlineSeconds: Math.round(elapsedSeconds),
@@ -206,7 +219,10 @@ router.post('/start', requireAuth, async (req: Request, res: Response) => {
       }
 
       await persist(conn, userId, state, now);
-      return { state, events: emptyTickEvents(), offlineSeconds: 0, previousMarketPrices: state.marketPrices };
+      return {
+        state, events: emptyTickEvents(), offlineSeconds: 0, previousMarketPrices: state.marketPrices,
+        earnings: { total: 0, credits: 0, hofladen: 0 },
+      };
     });
 
     return res.json({ newGame: false, ...result });

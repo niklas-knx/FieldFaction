@@ -25,7 +25,7 @@ import type { TickEvents } from '../farm/Farm';
 import { bus } from '../core/EventBus';
 import {
   apiGetMarketRequests, apiSubmitBid, apiGetMyBids, apiCancelBid,
-  apiGetReputation, apiDispatchAction, apiLoadState,
+  apiGetReputation, apiDispatchAction, apiLoadState, type EarningsSummary,
 } from '../api';
 import { CITY_PROFILES } from '../data/cityProfiles';
 
@@ -33,6 +33,7 @@ const navExpanded: Record<string, boolean> = { agriculture: true };
 
 export interface WelcomeBackSummary {
   offlineSeconds: number;
+  earnings: EarningsSummary;
   fieldsHarvested: number;
   stallCollectionsReady: number;
   processingCompleted: number;
@@ -385,10 +386,6 @@ export class FarmUI {
           <span class="nav-section-icon">⚙️</span>
           <span class="nav-section-title">Verarbeitung</span>
         </button>
-      </div>
-      <div class="nav-footer">
-        <div class="nav-stat"><span>Geerntet</span><strong>${this.state.stats.totalHarvested}×</strong></div>
-        <div class="nav-stat"><span>Einnahmen</span><strong>${this.state.stats.totalEarned.toLocaleString('de-DE')} €</strong></div>
       </div>`;
 
     document.getElementById('nav-toggle-agriculture')?.addEventListener('click', () => {
@@ -2589,11 +2586,6 @@ export class FarmUI {
         ${readyPlots.length === 0 ? '<p class="text-muted">Nichts zu tun</p>' : `
           <p class="text-success"><strong>${readyPlots.length}</strong> bereit</p>
           <button class="btn btn-harvest btn-full" id="harvest-all-btn">Alles einsammeln</button>`}
-      </div>
-      <div class="panel">
-        <h4 class="panel-title">📊 Statistiken</h4>
-        <div class="stat-row"><span>Einnahmen</span><strong>${this.state.stats.totalEarned.toLocaleString('de-DE')} €</strong></div>
-        <div class="stat-row"><span>Geerntet</span><strong>${this.state.stats.totalHarvested}×</strong></div>
       </div>`;
 
     document.getElementById('harvest-all-btn')?.addEventListener('click', async () => {
@@ -2616,12 +2608,19 @@ export class FarmUI {
   }
 
   showWelcomeBack(summary: WelcomeBackSummary): void {
-    const hasEvents = summary.fieldsHarvested > 0 || summary.stallCollectionsReady > 0
-      || summary.processingCompleted > 0 || summary.deliveriesArrived.length > 0
-      || summary.employeesFired.length > 0 || summary.wagesPaid > 0 || summary.topPriceMoves.length > 0;
+    const hasEvents = summary.earnings.total !== 0 || summary.fieldsHarvested > 0
+      || summary.stallCollectionsReady > 0 || summary.processingCompleted > 0
+      || summary.deliveriesArrived.length > 0 || summary.employeesFired.length > 0
+      || summary.wagesPaid > 0 || summary.topPriceMoves.length > 0;
     if (!hasEvents) return;
 
+    // Breakdown-Zeilen für die beiden Geldquellen, die sich sauber isolieren lassen —
+    // Löhne (Kosten) stehen unten weiterhin als eigene Zeile.
     const rows: string[] = [];
+    if (summary.earnings.hofladen > 0)
+      rows.push(`<div class="wb-row text-success">🏪 <strong>+${Math.round(summary.earnings.hofladen).toLocaleString('de-DE')} €</strong> Hofladen-Verkäufe</div>`);
+    if (summary.earnings.credits > 0)
+      rows.push(`<div class="wb-row text-success">🤝 <strong>+${Math.round(summary.earnings.credits).toLocaleString('de-DE')} €</strong> gewonnene Markt-Gebote</div>`);
     if (summary.fieldsHarvested > 0)
       rows.push(`<div class="wb-row">🌾 <strong>${summary.fieldsHarvested}×</strong> Feld-Ernte abgeschlossen</div>`);
     if (summary.stallCollectionsReady > 0)
@@ -2635,7 +2634,7 @@ export class FarmUI {
       rows.push(`<div class="wb-row">🚛 ${formatAmount(d.amount, p?.unit ?? '')} ${p?.name ?? d.productId} · ${from} → ${to} angekommen</div>`);
     });
     if (summary.wagesPaid > 0)
-      rows.push(`<div class="wb-row">💰 <strong>${Math.round(summary.wagesPaid).toLocaleString('de-DE')} €</strong> Löhne ausgezahlt</div>`);
+      rows.push(`<div class="wb-row text-danger">💸 <strong>-${Math.round(summary.wagesPaid).toLocaleString('de-DE')} €</strong> Löhne ausgezahlt</div>`);
     summary.employeesFired.forEach(f => {
       const def = EMPLOYEE_ROLES[f.role];
       rows.push(`<div class="wb-row text-danger">💸 ${def?.emoji ?? '👤'} ${def?.name ?? f.role} wegen unbezahlter Löhne gekündigt</div>`);
@@ -2646,6 +2645,10 @@ export class FarmUI {
       rows.push(`<div class="wb-row ${up ? 'text-success' : 'text-danger'}">${up ? '▲' : '▼'} ${p?.emoji ?? ''} ${p?.name ?? m.productId} ${up ? '+' : ''}${m.pctChange.toFixed(1)}%</div>`);
     });
 
+    const total      = Math.round(summary.earnings.total);
+    const totalUp    = total >= 0;
+    const totalLabel = `${totalUp ? '+' : ''}${total.toLocaleString('de-DE')} €`;
+
     const el = document.createElement('div');
     el.className = 'modal';
     el.id = 'welcome-back-modal';
@@ -2653,6 +2656,7 @@ export class FarmUI {
       <div class="modal-card">
         <h3>👋 Willkommen zurück!</h3>
         <p class="text-muted wb-subtitle">Das ist während deiner Abwesenheit (${this.formatDuration(summary.offlineSeconds)}) passiert:</p>
+        <div class="wb-earnings ${totalUp ? 'text-success' : 'text-danger'}">${totalLabel}</div>
         <div class="wb-list">${rows.join('')}</div>
         <button class="btn btn-primary btn-full" id="wb-close-btn">Los geht's</button>
       </div>`;

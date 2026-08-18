@@ -78,6 +78,14 @@ export async function apiResendVerification(login: string): Promise<void> {
 
 // Ein frisch verifizierter Account hat noch keinen Spielstand, bis er per apiStartGame
 // einen Startort gewählt hat — `state` fehlt dann (isNewGame: true).
+// Geldveränderung seit dem letzten Speichern, aufgeschlüsselt nach Quelle — fürs
+// "Willkommen zurück"-Popup, das die frühere Lebenszeit-Statistik-Anzeige ersetzt.
+export interface EarningsSummary {
+  total: number;
+  credits: number;
+  hofladen: number;
+}
+
 export type LoadResult =
   | { isNewGame: true }
   | {
@@ -86,6 +94,7 @@ export type LoadResult =
       events: TickEvents;
       offlineSeconds: number;
       previousMarketPrices: Record<string, number>;
+      earnings: EarningsSummary;
     };
 
 export async function apiLoadState(): Promise<LoadResult> {
@@ -98,6 +107,7 @@ export async function apiLoadState(): Promise<LoadResult> {
     events: data.events,
     offlineSeconds: data.offlineSeconds,
     previousMarketPrices: data.previousMarketPrices ?? data.state.marketPrices,
+    earnings: data.earnings ?? { total: 0, credits: 0, hofladen: 0 },
   };
 }
 
@@ -118,6 +128,7 @@ export async function apiStartGame(
     events: data.events,
     offlineSeconds: data.offlineSeconds,
     previousMarketPrices: data.previousMarketPrices ?? data.state.marketPrices,
+    earnings: data.earnings ?? { total: 0, credits: 0, hofladen: 0 },
   };
 }
 

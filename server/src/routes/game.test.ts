@@ -92,6 +92,29 @@ describe('GET /api/game/state', () => {
     expect(res.body.state.tick).toBeGreaterThanOrEqual(5);
     expect(res.body.offlineSeconds).toBeGreaterThanOrEqual(5);
   });
+
+  it('reports the money earned since the last save, broken down by source (fürs Willkommen-zurück-Popup)', async () => {
+    const saved = createInitialState();
+    const startMoney = saved.money;
+    execute.mockImplementation(async (sql: string) => {
+      if (/SELECT state_json/.test(sql)) {
+        return [[{ state_json: JSON.stringify(saved), save_version: 11, last_saved_at: Date.now() }]];
+      }
+      if (/SELECT id, amount_eur, product_changes_json, description FROM market_credits/.test(sql)) {
+        return [[{ id: 1, amount_eur: 250, product_changes_json: '[]', description: 'baecker · muenchen' }]];
+      }
+      if (/UPDATE market_credits SET applied/.test(sql)) return [{}];
+      if (/INSERT INTO game_states/.test(sql)) return [{}];
+      return [[]];
+    });
+
+    const res = await request(buildApp()).get('/api/game/state');
+    expect(res.status).toBe(200);
+    expect(res.body.earnings.credits).toBe(250);
+    expect(res.body.earnings.hofladen).toBe(0);
+    expect(res.body.earnings.total).toBe(250);
+    expect(res.body.state.money).toBe(startMoney + 250);
+  });
 });
 
 describe('POST /api/game/action', () => {

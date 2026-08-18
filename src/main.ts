@@ -4,7 +4,7 @@ import { LandingUI } from './ui/LandingUI';
 import { StartLocationUI } from './ui/StartLocationUI';
 import type { GameState } from './types';
 import type { TickEvents } from './farm/Farm';
-import { apiLoadState, apiStartGame, apiVerifyEmail, isLoggedIn, logout, type LoadResult } from './api';
+import { apiLoadState, apiStartGame, apiVerifyEmail, isLoggedIn, logout, type LoadResult, type EarningsSummary } from './api';
 import './style.css';
 import 'leaflet/dist/leaflet.css';
 
@@ -13,6 +13,9 @@ import 'leaflet/dist/leaflet.css';
 // Autosave-PUT) und fragt auch nicht mehr periodisch von sich aus nach — frischer Stand
 // kommt ausschließlich als Antwort auf eigene Aktionen zurück (siehe FarmUI.dispatch()).
 const RENDER_INTERVAL_MS = 1_000; // rein kosmetischer Re-render-Takt für Fortschrittsbalken
+// Erst ab dieser Abwesenheit lohnt sich das "Willkommen zurück"-Popup — sonst würde es
+// auch bei jedem kurzen Neuladen der Seite aufpoppen.
+const WELCOME_BACK_MIN_SECONDS = 5 * 60;
 
 const container = document.getElementById('app')!;
 
@@ -33,6 +36,7 @@ function buildWelcomeBackSummary(
   startPrices: Record<string, number>,
   endPrices: Record<string, number>,
   events: TickEvents,
+  earnings: EarningsSummary,
 ): WelcomeBackSummary {
   const topPriceMoves = Object.keys(endPrices)
     .map(productId => {
@@ -47,6 +51,7 @@ function buildWelcomeBackSummary(
 
   return {
     offlineSeconds,
+    earnings,
     fieldsHarvested: events.fieldsHarvested,
     stallCollectionsReady: events.stallCollectionsReady,
     processingCompleted: events.processingCompleted,
@@ -63,9 +68,9 @@ function enterGame(result: LoadedResult): void {
   state = result.state;
 
   let welcomeBack: WelcomeBackSummary | null = null;
-  if (result.offlineSeconds > 0) {
+  if (result.offlineSeconds >= WELCOME_BACK_MIN_SECONDS) {
     welcomeBack = buildWelcomeBackSummary(
-      result.offlineSeconds, result.previousMarketPrices, state.marketPrices, result.events,
+      result.offlineSeconds, result.previousMarketPrices, state.marketPrices, result.events, result.earnings,
     );
   }
 
