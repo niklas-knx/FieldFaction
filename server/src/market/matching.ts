@@ -66,7 +66,11 @@ async function generateRequests(now: number): Promise<void> {
   for (const [city, merchantIds] of Object.entries(CITY_MERCHANTS)) {
     const profile = CITY_PROFILES[city] ?? { priceMultiplier: 1.0, requestsPerRound: 3, quantityMultiplier: 1.0 };
 
-    const prevAt = lastGenAt[city] ?? now;
+    // Fällt beim allerersten Aufruf pro Stadt auf "vor 60s" zurück, nicht auf "jetzt" —
+    // sonst wäre elapsedMs beim ersten Mal 0, es würde nie eine Anfrage generiert, UND
+    // lastGenAt würde (nur im Erfolgsfall gesetzt) für immer undefined bleiben: jeder
+    // weitere Aufruf würde wieder bei "jetzt" starten und ewig 0 Anfragen erzeugen.
+    const prevAt = lastGenAt[city] ?? (now - 60_000);
     const elapsedMs = now - prevAt;
     const wanted = Math.floor((profile.requestsPerRound * elapsedMs) / 60_000);
     if (wanted <= 0) continue;

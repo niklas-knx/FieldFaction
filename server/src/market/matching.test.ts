@@ -5,7 +5,7 @@ vi.mock('../db', () => ({
 }));
 
 import { pool } from '../db';
-import { calcScore, processBids, processHofladenSales } from './matching';
+import { calcScore, processBids, processHofladenSales, ensureMarketFresh } from './matching';
 
 const execute = pool.execute as unknown as ReturnType<typeof vi.fn>;
 
@@ -233,5 +233,27 @@ describe('processHofladenSales', () => {
     const stock = result.hofladen.muenchen.offers[0].stock;
     expect(stock).toBe(0);
     expect(Number.isNaN(stock)).toBe(false);
+  });
+});
+
+// ── ensureMarketFresh / generateRequests: erster Aufruf pro Stadt darf nicht auf ewig ──
+// 0 Anfragen hängen bleiben (Regression: lastGenAt fiel beim ersten Mal auf "jetzt" statt
+// "vor 60s" zurück -> elapsedMs immer 0 -> nie generiert, siehe matching.ts).
+
+describe('ensureMarketFresh', () => {
+  it('generates merchant requests on the very first sweep for a city instead of computing zero elapsed time', async () => {
+    execute.mockReset();
+    const insertedRequests: any[] = [];
+    execute.mockImplementation(async (sql: string) => {
+      if (/SELECT COUNT\(\*\) AS cnt FROM market_requests/.test(sql)) return [[{ cnt: 0 }]];
+      if (/INSERT INTO market_requests/.test(sql)) { insertedRequests.push(sql); return [{}]; }
+      if (/SELECT \* FROM market_requests WHERE status = "open"/.test(sql)) return [[]]; // processBids: nichts abgelaufen
+      return [[]];
+    });
+
+    // now ist beliebig, muss nur groß genug für "now - 60_000 >= 0" sein.
+    await ensureMarketFresh(10_000_000);
+
+    expect(insertedRequests.length).toBeGreaterThan(0);
   });
 });
