@@ -117,9 +117,9 @@ durchgespielt worden — vor dem produktiven Einsatz einmal end-to-end gegenprü
 - IIS mit den Modulen [URL Rewrite](https://www.iis.net/downloads/microsoft/url-rewrite) und
   [Application Request Routing (ARR)](https://www.iis.net/downloads/microsoft/application-request-routing)
   (serverweit installiert — ARR läuft eventuell schon für SimSpedition mit)
-- [NSSM](https://nssm.cc/) (Non-Sucking Service Manager), um den Node-Prozess als
-  Windows-Dienst zu betreiben — jede andere Methode, einen Node-Prozess dauerhaft am
-  Laufen zu halten (PM2, Task Scheduler, …), funktioniert genauso
+- Ein Prozess-Manager, der den Node-Prozess dauerhaft am Laufen hält (siehe Schritt 4) —
+  ohne einen läuft jeder Deploy sonst auf "PID suchen, killen, `node dist\index.js`
+  manuell neu in einem Fenster starten" raus, das nervt auf Dauer und vergisst man leicht
 
 **1. Datenbank in der bestehenden MySQL-Instanz anlegen** (z.B. in Workbench):
 ```sql
@@ -145,15 +145,41 @@ copy server\.env.example server\.env
 notepad server\.env
 ```
 
-**4. Node als Windows-Dienst einrichten** (`server\.env` wird per `dotenv` relativ zum
-Arbeitsverzeichnis geladen — deshalb `AppDirectory` auf den `server`-Ordner setzen):
+**4. Node dauerhaft am Laufen halten — mit PM2 (empfohlen):**
+
+PM2 kommt per npm, kein separater Download nötig. Läuft der Server aktuell noch als
+nackter `node.exe`-Prozess (z.B. über `start "FieldFaction" node dist\index.js`
+gestartet), den einmalig beenden (`netstat -ano | findstr :3001` → PID → `taskkill /PID
+<PID> /F`), bevor PM2 übernimmt:
+```powershell
+npm install -g pm2
+cd C:\pfad\zu\fieldfaction\server
+pm2 start dist\index.js --name fieldfaction
+```
+Kurzer Check, bevor IIS eingebunden wird: `curl http://localhost:3001/api/health`
+sollte `{"ok":true}` liefern.
+
+Optional, damit PM2 auch einen kompletten Server-Neustart übersteht (sonst muss nach
+einem Reboot einmal `pm2 resurrect` von Hand laufen):
+```powershell
+npm install -g pm2-windows-startup
+pm2-startup install
+pm2 save
+```
+
+<details>
+<summary>Alternative: NSSM (Windows-Dienst)</summary>
+
+Braucht einen separaten Download ([nssm.cc](https://nssm.cc/)), übersteht einen
+Server-Neustart dafür ohne Zusatzpaket:
 ```powershell
 nssm install FieldFaction "C:\Program Files\nodejs\node.exe" "dist\index.js"
 nssm set FieldFaction AppDirectory "C:\pfad\zu\fieldfaction\server"
 nssm start FieldFaction
 ```
-Kurzer Check, bevor IIS eingebunden wird: `curl http://localhost:3001/api/health`
-sollte `{"ok":true}` liefern.
+Neustart nach einem Update dann `nssm restart FieldFaction` statt `pm2 restart
+fieldfaction` (siehe unten).
+</details>
 
 **5. IIS als Reverse Proxy einrichten:**
 - Im IIS-Manager am Server-Knoten unter *Application Request Routing Cache →
@@ -163,8 +189,14 @@ sollte `{"ok":true}` liefern.
 - [`deploy/iis-web.config`](deploy/iis-web.config) in den physischen Pfad dieser
   Website legen (Port darin anpassen, falls `PORT` in `server/.env` nicht 3001 ist).
 
-Neustart/Update danach: `npm run build:all` erneut ausführen, dann
-`nssm restart FieldFaction`.
+**Neustart/Update** — ab jetzt ein einziger Befehl statt PID suchen/killen:
+```powershell
+cd C:\pfad\zu\fieldfaction
+git pull
+npm run build:all
+pm2 restart fieldfaction
+```
+Oder alles in einem Rutsch über [`deploy/redeploy.ps1`](deploy/redeploy.ps1).
 
 ## Projektstruktur
 
