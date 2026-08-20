@@ -244,10 +244,12 @@ export class FarmUI {
 
   // `cosmetic` = rein kosmetischer Sekundentakt (siehe main.ts RENDER_INTERVAL_MS), ohne
   // dass sich der State geändert hat — nur für Ansichten mit laufenden Fortschrittsbalken/
-  // Restzeiten relevant. Der komplette Markt-Bereich (Hofladen, Reputation, Anfragen) wird
-  // dabei nie automatisch neu aufgebaut, damit offene Eingabefelder/Fokus nicht verloren
-  // gehen — die Anfragen-Restzeiten aktualisieren sich stattdessen nur noch bei echten
-  // State-Änderungen (eigene Aktion, manuelles Neuladen der Ansicht).
+  // Restzeiten relevant — konkret nur die Farm-Ansicht (Felder/Ställe/Zucht-Fortschritt).
+  // Alle anderen Ansichten werden auf dem kosmetischen Takt NIE automatisch neu aufgebaut:
+  // sonst gehen offene Eingabefelder/Fokus verloren (siehe Markt-/Bank-Bug) oder Dinge wie
+  // die Leaflet-Karte würden unnötig jede Sekunde neu erzeugt. Sie aktualisieren sich
+  // stattdessen nur noch bei echten State-Änderungen (eigene Aktion, Tab-Wechsel via
+  // refreshState()).
   render(state: GameState, cosmetic = false): void {
     if (state.tick !== this.lastSyncTick) {
       this.lastSyncTick = state.tick;
@@ -256,6 +258,7 @@ export class FarmUI {
     this.state = state;
     this.renderHUD();
     this.renderNav();
+    if (cosmetic && this.currentView !== 'farm') return;
     if (this.currentView === 'map') {
       this.renderMapView();
       const sidebarEl = document.getElementById('info-sidebar');
@@ -266,7 +269,6 @@ export class FarmUI {
       const sidebarEl = document.getElementById('info-sidebar');
       if (sidebarEl) sidebarEl.innerHTML = '';
     } else if (this.currentView === 'market') {
-      if (cosmetic) return; // Markt-Bereich nie automatisch neu aufbauen (siehe Kommentar oben)
       this.destroyLeafletMap();
       this.renderMarketView();
     } else if (this.currentView === 'prices') {
