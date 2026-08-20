@@ -116,6 +116,11 @@ async function loadAndAdvance(conn: PoolConnection, userId: number, now: number)
   if (!row) throw new NoGameYetError();
 
   let state: any = JSON.parse(row.state_json);
+  // Normalisiert Spielstände von vor dem Kreditsystem (fehlendes debt-Feld) sofort beim
+  // Laden — nicht erst in tickGame(), das bei elapsedSeconds < 1s (zwei Aktionen in
+  // derselben Sekunde) gar nicht läuft und die Normalisierung sonst überspringen würde
+  // (gleicher Bug wie neulich beim Hofladen-stock-Feld, siehe processHofladenSales()).
+  state.debt = state.debt ?? 0;
   const lastSavedAt = Number(row.last_saved_at);
   const startMoney  = state.money;
 

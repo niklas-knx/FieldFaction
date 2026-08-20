@@ -10,6 +10,7 @@ import {
   findFreeTransporter, distanceKm, transportDurationTicks, TRANSPORT_CAPACITY,
   findFreeEmployee, dailyPayroll,
   DAYS_PER_SEASON, PRICE_HISTORY_DAYS,
+  MAX_DEBT, DEBT_INTEREST_RATE,
 } from '../farm/Farm';
 import { VEHICLE_LIST, VEHICLES, TASK_LABELS } from '../data/vehicles';
 import { IMPLEMENT_LIST, IMPLEMENTS, IMPLEMENT_TASK_LABELS } from '../data/implements';
@@ -40,6 +41,7 @@ export interface WelcomeBackSummary {
   deliveriesArrived: Array<{ productId: string; amount: number; fromFarmId: string; toFarmId: string }>;
   employeesFired: Array<{ role: EmployeeRole; wage: number }>;
   wagesPaid: number;
+  interestAccrued: number;
   topPriceMoves: Array<{ productId: string; fromPrice: number; toPrice: number; pctChange: number }>;
 }
 
@@ -47,7 +49,7 @@ export class FarmUI {
   private container: HTMLElement;
   private state!: GameState;
   private onStateChange: (s: GameState) => void;
-  private currentView: 'farm' | 'map' | 'vehicles' | 'market' | 'prices' | 'logistics' | 'employees' | 'processing' = 'farm';
+  private currentView: 'farm' | 'map' | 'vehicles' | 'market' | 'prices' | 'logistics' | 'employees' | 'processing' | 'bank' = 'farm';
   private selectedMerchantId: string | null = null;
   private selectedMerchantFarmId: string | null = null;
   private leafletMap: L.Map | null = null;
@@ -287,6 +289,11 @@ export class FarmUI {
       this.renderProcessingView();
       const sidebarEl = document.getElementById('info-sidebar');
       if (sidebarEl) sidebarEl.innerHTML = '';
+    } else if (this.currentView === 'bank') {
+      this.destroyLeafletMap();
+      this.renderBankView();
+      const sidebarEl = document.getElementById('info-sidebar');
+      if (sidebarEl) sidebarEl.innerHTML = '';
     } else {
       this.destroyLeafletMap();
       this.renderFarmArea();
@@ -299,7 +306,9 @@ export class FarmUI {
   private renderHUD(): void {
     const moneyEl = document.getElementById('hud-money');
     if (!moneyEl) return;
-    moneyEl.innerHTML = `<span class="hud-money-value">💰 ${this.state.money.toLocaleString('de-DE')} €</span>`;
+    const debtHTML = this.state.debt > 0
+      ? ` <span class="hud-debt-value">🏦 -${this.state.debt.toLocaleString('de-DE')} €</span>` : '';
+    moneyEl.innerHTML = `<span class="hud-money-value">💰 ${this.state.money.toLocaleString('de-DE')} €</span>${debtHTML}`;
   }
 
   // ── Nav ──────────────────────────────────────────────────────────────────
@@ -386,6 +395,12 @@ export class FarmUI {
           <span class="nav-section-icon">⚙️</span>
           <span class="nav-section-title">Verarbeitung</span>
         </button>
+      </div>
+      <div class="nav-section">
+        <button class="nav-section-header ${this.currentView === 'bank' ? 'nav-section-map-active' : ''}" id="nav-bank-btn">
+          <span class="nav-section-icon">🏦</span>
+          <span class="nav-section-title">Kredit</span>
+        </button>
       </div>`;
 
     document.getElementById('nav-toggle-agriculture')?.addEventListener('click', () => {
@@ -445,6 +460,11 @@ export class FarmUI {
     });
     document.getElementById('nav-processing-btn')?.addEventListener('click', () => {
       this.currentView = this.currentView === 'processing' ? 'farm' : 'processing';
+      this.render(this.state);
+      this.refreshState();
+    });
+    document.getElementById('nav-bank-btn')?.addEventListener('click', () => {
+      this.currentView = this.currentView === 'bank' ? 'farm' : 'bank';
       this.render(this.state);
       this.refreshState();
     });
@@ -2385,7 +2405,7 @@ export class FarmUI {
           <h4 class="panel-title">Dein Personal</h4>
           ${payroll > 0 ? `<p class="${payrollTight ? 'text-danger' : 'text-muted'}" style="font-size:12px;margin-bottom:8px">
             💰 Gesamt-Tageslohn: <strong>${payroll.toLocaleString('de-DE')} €</strong>/Tag
-            ${payrollTight ? ' · reicht dein Kontostand nicht, werden die teuersten Mitarbeiter automatisch gekündigt!' : ''}
+            ${payrollTight ? ' · reicht dein Kontostand nicht, werden die teuersten Mitarbeiter automatisch gekündigt! <a href="#" id="emp-bank-link">🏦 Kredit aufnehmen</a>' : ''}
           </p>` : ''}
           ${overviewHTML}
           ${this.state.employees.length > 0 ? `<div class="farm-fleet-section" style="margin-top:12px">${employeeRows}</div>` : ''}
@@ -2419,6 +2439,73 @@ export class FarmUI {
         await this.dispatch('fireEmployee', [uid]);
         this.renderHUD(); this.renderNav(); this.renderEmployeesView();
       });
+    });
+    document.getElementById('emp-bank-link')?.addEventListener('click', e => {
+      e.preventDefault();
+      this.currentView = 'bank';
+      this.render(this.state);
+      this.refreshState();
+    });
+  }
+
+  // ── Kredit ───────────────────────────────────────────────────────────────
+
+  private renderBankView(): void {
+    const el = document.getElementById('farm-area');
+    if (!el) return;
+
+    const debt      = this.state.debt;
+    const available = Math.max(0, MAX_DEBT - debt);
+    const dailyInterest = Math.round(debt * DEBT_INTEREST_RATE);
+
+    el.innerHTML = `
+      <div class="farm-header">
+        <div class="farm-breadcrumb">
+          <span class="breadcrumb-section">🏦 Kredit</span>
+        </div>
+      </div>
+      <div class="vshop-layout">
+        <div class="panel vshop-fleet-panel">
+          <h4 class="panel-title">Dein Kredit</h4>
+          <p class="text-muted" style="font-size:12px;margin-bottom:8px">
+            Zinssatz: <strong>${(DEBT_INTEREST_RATE * 100).toFixed(0)}% / Spieltag</strong> auf die offene Summe,
+            Limit: <strong>${MAX_DEBT.toLocaleString('de-DE')} €</strong>.
+          </p>
+          <div class="stat-row"><span>Offene Schuld</span><strong class="${debt > 0 ? 'text-danger' : ''}">${debt.toLocaleString('de-DE')} €</strong></div>
+          ${debt > 0 ? `<div class="stat-row"><span>Zinsen /Tag (aktuell)</span><strong class="text-danger">+${dailyInterest.toLocaleString('de-DE')} €</strong></div>` : ''}
+          <div class="stat-row"><span>Verbleibendes Limit</span><strong>${available.toLocaleString('de-DE')} €</strong></div>
+        </div>
+        <div class="vshop-catalog">
+          <div class="vshop-section-label">💰 Kredit aufnehmen</div>
+          <div class="hofladen-add-form">
+            <input class="order-amount-input" id="bank-borrow-amount" type="number" min="1" max="${available}"
+              placeholder="Betrag" ${available > 0 ? '' : 'disabled'} />
+            <button class="btn btn-primary" id="bank-borrow-btn" ${available > 0 ? '' : 'disabled'}>Aufnehmen</button>
+          </div>
+          ${debt > 0 ? `
+            <div class="vshop-section-label" style="margin-top:16px">💸 Zurückzahlen</div>
+            <div class="hofladen-add-form">
+              <input class="order-amount-input" id="bank-repay-amount" type="number" min="1" max="${Math.min(debt, this.state.money)}"
+                placeholder="Betrag" />
+              <button class="btn btn-secondary" id="bank-repay-btn">Zurückzahlen</button>
+            </div>
+          ` : ''}
+        </div>
+      </div>`;
+
+    document.getElementById('bank-borrow-btn')?.addEventListener('click', async () => {
+      const inp = document.getElementById('bank-borrow-amount') as HTMLInputElement;
+      const amount = Number(inp.value);
+      if (!(amount > 0)) { bus.emit('notification', '❌ Betrag eingeben'); return; }
+      await this.dispatch('takeLoan', [amount]);
+      this.renderHUD(); this.renderBankView();
+    });
+    document.getElementById('bank-repay-btn')?.addEventListener('click', async () => {
+      const inp = document.getElementById('bank-repay-amount') as HTMLInputElement;
+      const amount = Number(inp.value);
+      if (!(amount > 0)) { bus.emit('notification', '❌ Betrag eingeben'); return; }
+      await this.dispatch('repayLoan', [amount]);
+      this.renderHUD(); this.renderBankView();
     });
   }
 
@@ -2611,7 +2698,7 @@ export class FarmUI {
     const hasEvents = summary.earnings.total !== 0 || summary.fieldsHarvested > 0
       || summary.stallCollectionsReady > 0 || summary.processingCompleted > 0
       || summary.deliveriesArrived.length > 0 || summary.employeesFired.length > 0
-      || summary.wagesPaid > 0 || summary.topPriceMoves.length > 0;
+      || summary.wagesPaid > 0 || summary.interestAccrued > 0 || summary.topPriceMoves.length > 0;
     if (!hasEvents) return;
 
     // Breakdown-Zeilen für die beiden Geldquellen, die sich sauber isolieren lassen —
@@ -2635,6 +2722,8 @@ export class FarmUI {
     });
     if (summary.wagesPaid > 0)
       rows.push(`<div class="wb-row text-danger">💸 <strong>-${Math.round(summary.wagesPaid).toLocaleString('de-DE')} €</strong> Löhne ausgezahlt</div>`);
+    if (summary.interestAccrued > 0)
+      rows.push(`<div class="wb-row text-danger">🏦 <strong>+${Math.round(summary.interestAccrued).toLocaleString('de-DE')} €</strong> Kredit-Zinsen</div>`);
     summary.employeesFired.forEach(f => {
       const def = EMPLOYEE_ROLES[f.role];
       rows.push(`<div class="wb-row text-danger">💸 ${def?.emoji ?? '👤'} ${def?.name ?? f.role} wegen unbezahlter Löhne gekündigt</div>`);

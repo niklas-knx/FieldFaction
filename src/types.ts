@@ -215,6 +215,7 @@ export interface Delivery {
 
 export interface GameState {
   money: number;
+  debt: number; // aufgenommener Kredit inkl. aufgelaufener Zinsen, siehe takeLoan/repayLoan
   tick: number;
   day: number;
   season: Season;

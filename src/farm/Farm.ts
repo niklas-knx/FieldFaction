@@ -17,6 +17,10 @@ export const FIELD_WORK_TICKS  = 900; // 15 Minuten Traktorarbeit pro Parzelle
 
 export const PLOT_UNLOCK_COSTS = [0,0,0, 200,400,800, 1500,3000,5000, 8000,12000,18000];
 
+// ── Kredit ────────────────────────────────────────────────────────────────────
+export const MAX_DEBT           = 10_000; // Kreditlimit (2× Startkapital)
+export const DEBT_INTEREST_RATE = 0.02;   // 2 %/Spieltag auf die offene Summe
+
 // ── Logistik ──────────────────────────────────────────────────────────────────
 export const TRANSPORT_CAPACITY      = 5000; // max. Einheiten pro Fahrt
 // 1 Tick = 1 Sekunde Echtzeit (wie Feldarbeit/Wachstum) — Fahrzeit entspricht also einer echten LKW-Fahrt.
@@ -223,7 +227,7 @@ export function createInitialState(start?: StartLocationInput): GameState {
   const farmId = startMeta.id;
 
   return {
-    money: 5_000, tick: 0, day: 1, season: 'spring', year: 1,
+    money: 5_000, debt: 0, tick: 0, day: 1, season: 'spring', year: 1,
     farms: { [farmId]: makeFarm() }, farmMeta: [startMeta], activeFarmId: farmId,
     employees: [
       { uid: 1, role: 'farmer', farmId, wage: EMPLOYEE_ROLES.farmer.wagePerDay, inUseUntilTick: 0 },
@@ -272,12 +276,13 @@ export interface TickEvents {
   deliveriesArrived: DeliveryArrivedEvent[];
   employeesFired: EmployeeFiredEvent[];
   wagesPaid: number;
+  interestAccrued: number;
 }
 
 export function emptyTickEvents(): TickEvents {
   return {
     fieldsHarvested: 0, stallCollectionsReady: 0, processingCompleted: 0,
-    deliveriesArrived: [], employeesFired: [], wagesPaid: 0,
+    deliveriesArrived: [], employeesFired: [], wagesPaid: 0, interestAccrued: 0,
   };
 }
 
@@ -403,9 +408,18 @@ export function tickGame(state: GameState): { state: GameState; events: TickEven
     wageSettlement.fired.forEach(e => events.employeesFired.push({ role: e.role, wage: e.wage }));
   }
   const priceUpdate = dayChanged ? advanceMarketPrices(state, day) : {};
+
+  // `state.debt ?? 0` normalisiert Spielstände von vor der Einführung des Kreditsystems
+  // (fehlendes Feld) auf 0, statt dass spätere Arithmetik zu NaN wird — debt wird deshalb
+  // bewusst IMMER explizit zurückgegeben, nicht nur bei tatsächlicher Zinsänderung.
+  const debtBefore = state.debt ?? 0;
+  const interest = dayChanged && debtBefore > 0 ? Math.round(debtBefore * DEBT_INTEREST_RATE) : 0;
+  if (interest > 0) events.interestAccrued += interest;
+
   return {
     state: {
       ...state, tick, day, season, year, farms,
+      debt: debtBefore + interest,
       ...(wageSettlement ? { money: wageSettlement.money, employees: wageSettlement.employees } : {}),
       ...priceUpdate,
       deliveries: pendingDeliveries,
@@ -1045,6 +1059,27 @@ export function sellFromStorage(state: GameState, farmId: string, productId: str
     money: state.money + earned,
     stats: { ...state.stats, totalEarned: state.stats.totalEarned + earned },
   };
+}
+
+// ── Kredit ───────────────────────────────────────────────────────────────────
+
+export function takeLoan(state: GameState, amount: number): GameState {
+  if (!(amount > 0)) return state;
+  const debt = state.debt ?? 0;
+  const available = MAX_DEBT - debt;
+  if (available <= 0) { bus.emit('notification', '🏦 Kreditlimit erreicht'); return state; }
+  const actual = Math.min(amount, available);
+  bus.emit('notification', `🏦 ${actual.toLocaleString('de-DE')} € Kredit aufgenommen`);
+  return { ...state, money: state.money + actual, debt: debt + actual };
+}
+
+export function repayLoan(state: GameState, amount: number): GameState {
+  if (!(amount > 0)) return state;
+  const debt = state.debt ?? 0;
+  const actual = Math.min(amount, debt, state.money);
+  if (actual <= 0) { bus.emit('notification', '💸 Nicht genug Geld oder kein offener Kredit'); return state; }
+  bus.emit('notification', `🏦 ${actual.toLocaleString('de-DE')} € Kredit zurückgezahlt`);
+  return { ...state, money: state.money - actual, debt: debt - actual };
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

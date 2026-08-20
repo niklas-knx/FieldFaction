@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
   createInitialState, designateField, tillPlot, plantCrop, harvestPlot, tickGame,
-  buildStall, collectStall,
-  FIELD_WORK_TICKS,
+  buildStall, collectStall, takeLoan, repayLoan,
+  FIELD_WORK_TICKS, TICKS_PER_DAY, MAX_DEBT, DEBT_INTEREST_RATE,
 } from './Farm';
 import { CROPS } from '../data/crops';
 import { stallCapacity } from '../data/animals';
@@ -133,6 +133,67 @@ describe('animal production trickles into a capped stall buffer', () => {
     state = advanceTicks(state, 1728);
     expect(stallA().outputReady).toBe(1);
   }, 30_000);
+});
+
+describe('credit system', () => {
+  it('takeLoan increases money and debt by the same amount, capped at the limit', () => {
+    let state = createInitialState();
+    const startMoney = state.money;
+
+    state = takeLoan(state, 3_000);
+    expect(state.money).toBe(startMoney + 3_000);
+    expect(state.debt).toBe(3_000);
+
+    // Nachfrage über das verbleibende Limit hinaus -> nur bis zur Grenze
+    state = takeLoan(state, MAX_DEBT);
+    expect(state.debt).toBe(MAX_DEBT);
+    expect(state.money).toBe(startMoney + MAX_DEBT);
+  });
+
+  it('does nothing once the debt limit is already reached', () => {
+    const state = { ...createInitialState(), debt: MAX_DEBT };
+    const result = takeLoan(state, 100);
+    expect(result).toBe(state); // no-op: state reference unchanged
+  });
+
+  it('repayLoan reduces money and debt by the same amount, capped at the open debt', () => {
+    let state = createInitialState();
+    state = takeLoan(state, 2_000);
+    const moneyAfterLoan = state.money;
+
+    state = repayLoan(state, 500);
+    expect(state.debt).toBe(1_500);
+    expect(state.money).toBe(moneyAfterLoan - 500);
+
+    // Mehr zurückzahlen wollen als offen ist -> kappt auf die Restschuld
+    state = repayLoan(state, 10_000);
+    expect(state.debt).toBe(0);
+  });
+
+  it('caps repayment at available money, not just at the open debt', () => {
+    const state = { ...createInitialState(), money: 100, debt: 5_000 };
+    const result = repayLoan(state, 5_000);
+    expect(result.money).toBe(0);
+    expect(result.debt).toBe(4_900);
+  });
+
+  it('accrues interest exactly once at the day boundary via tickGame', () => {
+    let state = { ...createInitialState(), debt: 1_000 };
+    // Kurz vor dem Tageswechsel: noch keine Zinsen
+    state = advanceTicks(state, TICKS_PER_DAY - 1);
+    expect(state.debt).toBe(1_000);
+    // Der Tick, der den Tag wechselt, verzinst genau einmal
+    state = advanceTicks(state, 1);
+    expect(state.debt).toBe(1_000 + Math.round(1_000 * DEBT_INTEREST_RATE));
+  });
+
+  it('normalizes a missing debt field (pre-credit-system saves) to 0 instead of NaN', () => {
+    const legacyState: any = createInitialState();
+    delete legacyState.debt;
+    const result = tickGame(legacyState).state;
+    expect(result.debt).toBe(0);
+    expect(Number.isNaN(result.debt)).toBe(false);
+  });
 });
 
 describe('createInitialState with a chosen starting location', () => {

@@ -58,6 +58,7 @@ function buildWelcomeBackSummary(
     deliveriesArrived: events.deliveriesArrived,
     employeesFired: events.employeesFired,
     wagesPaid: events.wagesPaid,
+    interestAccrued: events.interestAccrued,
     topPriceMoves,
   };
 }

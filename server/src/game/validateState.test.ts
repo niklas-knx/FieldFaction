@@ -6,6 +6,7 @@ const TICKS_PER_DAY = 86_400;
 function baseState(overrides: Record<string, any> = {}): any {
   return {
     money: 5_000,
+    debt: 0,
     tick: 0,
     day: 1,
     employees: [],
@@ -33,6 +34,12 @@ describe('validateGameStateShape', () => {
     expect(validateGameStateShape(baseState({ money: -5 })).valid).toBe(false);
     // -1 is the documented floor (debt buffer) and must still pass
     expect(validateGameStateShape(baseState({ money: -1 })).valid).toBe(true);
+  });
+
+  it('rejects a negative or non-finite debt', () => {
+    expect(validateGameStateShape(baseState({ debt: NaN })).valid).toBe(false);
+    expect(validateGameStateShape(baseState({ debt: -1 })).valid).toBe(false);
+    expect(validateGameStateShape(baseState({ debt: 10_000 })).valid).toBe(true);
   });
 
   it('rejects a negative or non-finite tick', () => {

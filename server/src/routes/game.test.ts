@@ -93,6 +93,18 @@ describe('GET /api/game/state', () => {
     expect(res.body.offlineSeconds).toBeGreaterThanOrEqual(5);
   });
 
+  it('normalizes a save from before the credit system (missing debt field) to 0 instead of rejecting it', async () => {
+    const saved: any = createInitialState();
+    delete saved.debt; // Spielstand von vor takeLoan/repayLoan
+    // 0 Sekunden seit dem letzten Speichern: advanceState() läuft 0 Ticks, tickGame() greift
+    // also nicht — die Normalisierung muss unabhängig davon in loadAndAdvance() passieren.
+    installSavedState(saved, Date.now());
+
+    const res = await request(buildApp()).get('/api/game/state');
+    expect(res.status).toBe(200);
+    expect(res.body.state.debt).toBe(0);
+  });
+
   it('reports the money earned since the last save, broken down by source (fürs Willkommen-zurück-Popup)', async () => {
     const saved = createInitialState();
     const startMoney = saved.money;

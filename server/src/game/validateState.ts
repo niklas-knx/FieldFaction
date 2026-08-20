@@ -27,6 +27,7 @@ function isFiniteNumber(n: unknown): n is number {
 export function validateGameStateShape(state: any): ValidationResult {
   if (!state || typeof state !== 'object') return { valid: false, reason: 'state ist kein Objekt' };
   if (!isFiniteNumber(state.money) || state.money < -1) return { valid: false, reason: 'money ungültig' };
+  if (!isFiniteNumber(state.debt) || state.debt < 0) return { valid: false, reason: 'debt ungültig' };
   if (!isFiniteNumber(state.tick) || state.tick < 0) return { valid: false, reason: 'tick ungültig' };
   if (!isFiniteNumber(state.day) || state.day < 1) return { valid: false, reason: 'day ungültig' };
 
