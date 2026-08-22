@@ -141,10 +141,14 @@ export class FarmUI {
     this.container.innerHTML = `
       <div class="game-wrapper">
         <header class="top-bar">
-          <div class="top-bar-left"><span class="game-title">🌿 FieldFaction</span></div>
+          <div class="top-bar-left">
+            <button class="hamburger-btn" id="hamburger-btn" aria-label="Menü öffnen">☰</button>
+            <span class="game-title">🌿 FieldFaction</span>
+          </div>
           <div class="top-bar-right" id="hud-money"></div>
         </header>
         <div class="game-body">
+          <div class="nav-backdrop" id="nav-backdrop"></div>
           <nav class="nav-sidebar" id="nav-sidebar"></nav>
           <main class="farm-area" id="farm-area"></main>
           <div class="info-sidebar" id="info-sidebar"></div>
@@ -240,6 +244,22 @@ export class FarmUI {
     document.getElementById('processing-builder-cancel')!.addEventListener('click', () => this.closeModals());
     document.getElementById('market-order-cancel')!.addEventListener('click', () => this.closeModals());
     document.getElementById('market-order-confirm')!.addEventListener('click', () => this.submitMarketOrder());
+
+    // Mobile Nav-Drawer: Hamburger/Backdrop öffnen/schließen die Sidebar als Overlay
+    // (siehe Media Query in style.css). Ein Klick auf einen Button *in* der Sidebar
+    // schließt sie ebenfalls wieder — Delegation auf dem Container statt auf jedem
+    // einzelnen Nav-Button, da renderNav() dessen innerHTML laufend neu aufbaut.
+    document.getElementById('hamburger-btn')!.addEventListener('click', () => {
+      this.container.querySelector('.game-wrapper')!.classList.toggle('nav-open');
+    });
+    document.getElementById('nav-backdrop')!.addEventListener('click', () => {
+      this.container.querySelector('.game-wrapper')!.classList.remove('nav-open');
+    });
+    document.getElementById('nav-sidebar')!.addEventListener('click', e => {
+      if ((e.target as HTMLElement).closest('button')) {
+        this.container.querySelector('.game-wrapper')!.classList.remove('nav-open');
+      }
+    });
   }
 
   // `cosmetic` = rein kosmetischer Sekundentakt (siehe main.ts RENDER_INTERVAL_MS), ohne

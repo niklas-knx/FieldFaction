@@ -27,6 +27,7 @@ html, body {
 }
 
 #app { height: 100vh; }
+@supports (height: 100dvh) { #app { height: 100dvh; } }
 
 /* ─── Layout ─── */
 .game-wrapper {
@@ -34,7 +35,9 @@ html, body {
   flex-direction: column;
   height: 100vh;
   overflow: hidden;
+  position: relative;
 }
+@supports (height: 100dvh) { .game-wrapper { height: 100dvh; } }
 
 .top-bar {
   display: flex;
@@ -47,11 +50,41 @@ html, body {
   flex-shrink: 0;
 }
 
+.top-bar-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
+
 .game-title {
   font-size: 18px;
   font-weight: 700;
   color: var(--accent);
   letter-spacing: 0.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hamburger-btn {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+.hamburger-btn:hover { border-color: var(--accent); }
+
+.nav-backdrop {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.55);
+  z-index: 150;
 }
 
 .top-bar-center {
@@ -1865,3 +1898,103 @@ kbd {
 .price-chart-dot { fill: currentColor; }
 
 .prices-chart-days { margin-top: 8px; font-size: 11px; text-align: right; }
+
+/* ═══════════════════════════════════════════════════
+   MOBILE
+   ═══════════════════════════════════════════════════ */
+@media (max-width: 860px) {
+  .top-bar { padding: 0 10px; height: 48px; }
+  .game-title { font-size: 15px; }
+  .hamburger-btn { display: flex; }
+  .hud-money-value { font-size: 13px; }
+  .hud-debt-value { font-size: 12px; }
+
+  /* Nav sidebar becomes a slide-in drawer instead of a fixed grid column */
+  .game-body {
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+    overflow-x: hidden;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .nav-sidebar {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 84vw;
+    max-width: 320px;
+    z-index: 200;
+    transform: translateX(-100%);
+    transition: transform 0.22s ease;
+    box-shadow: 6px 0 30px rgba(0,0,0,0.5);
+    padding-top: 48px;
+  }
+  .game-wrapper.nav-open .nav-sidebar { transform: translateX(0); }
+  .game-wrapper.nav-open .nav-backdrop { display: block; }
+
+  .farm-area, .info-sidebar {
+    width: 100%;
+    overflow: visible;
+  }
+  .farm-area { padding: 14px 12px 24px; }
+  .info-sidebar {
+    border-left: none;
+    border-top: 1px solid var(--border);
+    padding: 12px;
+  }
+
+  /* Bigger touch targets throughout the drawer */
+  .nav-section-header, .nav-item { padding-top: 12px; padding-bottom: 12px; }
+
+  /* Grids: fewer / narrower columns so cards stay readable and tappable */
+  .fields-grid { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 8px; }
+  .plot-use-grid { grid-template-columns: 1fr 1fr; }
+  .merchant-grid { grid-template-columns: 1fr; }
+  .lp-features-grid { grid-template-columns: 1fr; }
+
+  .prices-layout { flex-direction: column; }
+  .prices-sidebar-list { width: 100%; flex-direction: row; flex-wrap: wrap; gap: 8px; }
+  .price-group-title { width: 100%; }
+  .price-product-btn { width: auto; flex: 1 1 140px; }
+
+  .vshop-card { flex-wrap: wrap; }
+  .vshop-right { align-items: flex-start; flex-direction: row; width: 100%; justify-content: space-between; }
+
+  .market-sell-row {
+    grid-template-columns: 1fr 1fr;
+    row-gap: 2px;
+  }
+  .market-sell-btn { grid-column: 1 / -1; margin-top: 2px; }
+
+  /* Modals: use most of the viewport, avoid cramped padding */
+  .modal-card { width: 94vw; padding: 16px; max-height: 88vh; }
+  .plot-use-btn { padding: 12px 6px; }
+
+  .btn { min-height: 40px; }
+
+  /* Landing / auth pages */
+  .lp-nav { padding: 0 16px; }
+  .lp-hero { padding: 90px 18px 50px; }
+  .lp-stat-row { flex-wrap: wrap; gap: 14px; justify-content: center; }
+  .lp-auth { padding: 60px 16px 70px; }
+  .lp-auth-card { padding: 20px; }
+  .lp-footer { flex-direction: column; gap: 6px; text-align: center; padding: 20px 16px; }
+
+  .auth-card { width: 100%; max-width: 360px; padding: 28px 22px; }
+
+  /* Rows built for wide desktop panels: let them wrap instead of overflowing */
+  .hofladen-offer-row, .fleet-overview-row, .fleet-tags,
+  .hofladen-add-form, .new-loc-buttons, .bid-form-actions {
+    flex-wrap: wrap;
+  }
+  .hofladen-offer-prod { flex-basis: 100%; }
+}
+
+@media (max-width: 420px) {
+  .plot-use-grid { grid-template-columns: 1fr; }
+  .zone-grid { grid-template-columns: repeat(3, 1fr); }
+  .stall-size-row { grid-template-columns: 1fr; }
+  .lp-headline { font-size: 30px; }
+}

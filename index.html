@@ -5,7 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>FieldFaction</title>
-    <style>html, body { height: 100%; overflow: hidden; }</style>
+    <style>
+      html, body { height: 100%; overflow: hidden; }
+      @supports (height: 100dvh) { html, body { height: 100dvh; } }
+    </style>
   </head>
   <body>
     <div id="app"></div>
