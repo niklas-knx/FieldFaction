@@ -1090,13 +1090,16 @@ export function growthProgress(plot: Plot, currentTick: number): number {
 }
 
 // Füllstand des Stall-Puffers relativ zur Kapazität (0 = leer, 1 = voll/pausiert).
+// Zählt productionAccum (den noch unfertigen Bruchteil des nächsten Eis/L Milch/…)
+// mit ein, damit der Balken laufend wächst statt nur in Sprüngen bei jeder ganzen
+// Einheit — sonst wirkt die Anzeige zwischen zwei Einheiten wie eingefroren.
 export function slotProgress(slot: StallSlot, stallSize: StallSize): number {
   if (!slot.animalId || slot.animalCount === 0) return 0;
   const animal = ANIMALS[slot.animalId];
   if (!animal || animal.noProductCycle) return 0;
   const capacity = stallCapacity(slot.animalId, slot.animalCount, stallSize);
   if (capacity <= 0) return 0;
-  return Math.min(1, slot.outputReady / capacity);
+  return Math.min(1, (slot.outputReady + slot.productionAccum) / capacity);
 }
 
 export function slotBreedProgress(slot: StallSlot, stallSize: 'full' | 'half', currentTick: number): number {

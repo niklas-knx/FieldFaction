@@ -1,7 +1,7 @@
 import type { GameState, Plot, StallSize, FarmMeta, MarketRequest, MarketBid, EmployeeRole } from '../types';
 import * as L from 'leaflet';
 import { CROPS, CROP_LIST } from '../data/crops';
-import { ANIMALS, ANIMAL_LIST, happinessLabel, happinessHearts, computeYield, stallCapacity, getMaxAnimals, getBuyCost, getBreedingCycle } from '../data/animals';
+import { ANIMALS, ANIMAL_LIST, happinessLabel, happinessHearts, stallCapacity, getMaxAnimals, getBuyCost, getBreedingCycle } from '../data/animals';
 import { PRODUCTS, formatAmount, productValue, totalStorageValue } from '../data/products';
 import {
   growthProgress, slotProgress, slotBreedProgress, farmReadyCount, nextBuyablePlot,
@@ -1466,7 +1466,6 @@ export class FarmUI {
       const max       = getMaxAnimals(slot.animalId, plot.stallSize);
       const buyCost   = getBuyCost(slot.animalId, plot.stallSize);
       const breedCyc  = getBreedingCycle(slot.animalId, plot.stallSize);
-      const dailyYield = computeYield(slot.animalId, count, plot.stallSize);
       const capacity  = stallCapacity(slot.animalId, count, plot.stallSize);
       const waiting   = slot.outputReady;
       const val       = Math.round(waiting * currentPrice(this.state, animal.productId));
@@ -1499,22 +1498,22 @@ export class FarmUI {
           id="${sid}-buy" ${canBuy ? '' : 'disabled'}>
           + Tier · ${buyCost} €
         </button>
-        ${animal.noProductCycle ? '' : waiting > 0 ? `
-          <div class="stall-ready-row">
-            <span>${animal.productEmoji} <strong>${waiting} ${animal.productUnit}</strong></span>
-            <span class="stall-val">+${val} €</span>
-          </div>
-          <button class="stall-collect-btn" id="${sid}-collect">Einlagern</button>
-          <span class="fc-yield-hint">${waiting >= capacity
-            ? '🛑 Stall voll — Produktion pausiert bis zum Einlagern'
-            : `füllt sich weiter (${waiting}/${capacity})`}</span>
-        ` : count > 0 ? `
+        ${animal.noProductCycle ? '' : count > 0 ? `
           <div class="fc-progress-wrap">
             <div class="fc-progress-bar">
               <div class="fc-progress-fill" style="width:${prog*100}%;background:#c47a30"></div>
             </div>
-            <span class="fc-time-remain">0/${capacity} ${animal.productUnit} im Stall · ${dailyYield}/Tag möglich</span>
-          </div>` : `<span class="fc-yield-hint">Keine Tiere</span>`}
+            <span class="fc-time-remain">${waiting}/${capacity} ${animal.productUnit} bereit · 1x/Tag einsammeln reicht</span>
+          </div>
+          ${waiting > 0 ? `
+            <div class="stall-ready-row">
+              <span>${animal.productEmoji} <strong>${waiting} ${animal.productUnit}</strong></span>
+              <span class="stall-val">+${val} €</span>
+            </div>
+            <button class="stall-collect-btn" id="${sid}-collect">Einsammeln</button>
+            ${waiting >= capacity ? `<span class="fc-yield-hint">🛑 Stall voll — Produktion pausiert bis zum Einsammeln</span>` : ''}
+          ` : ''}
+        ` : `<span class="fc-yield-hint">Keine Tiere</span>`}
       </div>`;
     };
 

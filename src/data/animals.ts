@@ -156,7 +156,8 @@ export function computeYield(animalId: string, animalCount: number, size: 'full'
 // Tiere legen/produzieren nicht mehr alle gleichzeitig am Zyklusende, sondern laufend über
 // den Tag verteilt in einen Puffer (StallSlot.outputReady), der bei Erreichen dieser
 // Kapazität stoppt, bis der Spieler ihn einsammelt (siehe tickGame() in Farm.ts).
-const COLLECTIONS_PER_DAY = 6; // ≈ alle 4 Stunden fällig
+// 1 = Kapazität entspricht dem vollen Tagesertrag → 1x/Tag einsammeln reicht.
+const COLLECTIONS_PER_DAY = 1;
 
 export function stallCapacity(animalId: string, animalCount: number, size: 'full' | 'half'): number {
   const dailyYield = computeYield(animalId, animalCount, size);

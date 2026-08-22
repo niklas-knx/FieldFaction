@@ -111,9 +111,10 @@ describe('animal production trickles into a capped stall buffer', () => {
     };
     const stallA = () => state.farms[FARM_ID].plots[PLOT_ID].stallA;
 
-    // 50 Hühner × 1 Ei/Tag × Freiland-Happiness 1.0 = 50 Eier/Tag → Kapazität = ceil(50/6) = 9
+    // 50 Hühner × 1 Ei/Tag × Freiland-Happiness 1.0 = 50 Eier/Tag → Kapazität = voller
+    // Tagesertrag (COLLECTIONS_PER_DAY = 1), damit 1x/Tag Einsammeln reicht.
     const capacity = stallCapacity('chicken', 50, 'full');
-    expect(capacity).toBe(9);
+    expect(capacity).toBe(50);
 
     // Rate = 50/86400 Eier/Sekunde. Für das erste ganze Ei: ceil(86400/50) = 1728 Ticks.
     state = advanceTicks(state, 1727);
@@ -121,8 +122,8 @@ describe('animal production trickles into a capped stall buffer', () => {
     state = advanceTicks(state, 1);
     expect(stallA().outputReady).toBe(1);
 
-    // Weit über die Kapazität hinaus laufen lassen — darf trotzdem nicht mehr als 9 werden.
-    state = advanceTicks(state, 50_000);
+    // Weit über die Kapazität hinaus laufen lassen — darf trotzdem nicht mehr als 50 werden.
+    state = advanceTicks(state, 200_000);
     expect(stallA().outputReady).toBe(capacity);
 
     // Einlagern leert den Puffer ins Lager; danach läuft die Produktion weiter.
