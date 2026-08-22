@@ -9,7 +9,8 @@ CREATE TABLE IF NOT EXISTS users (
   email_verified TINYINT(1) NOT NULL DEFAULT 0,
   verification_token VARCHAR(64) NULL,
   verification_token_expires_at BIGINT NULL,
-  created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  last_active_at BIGINT NULL  -- Unix-Millisekunden, letzte echte Spielaktion (nicht nur Login) — siehe persist() in server/src/routes/game.ts
 );
 
 CREATE TABLE IF NOT EXISTS game_states (

@@ -64,6 +64,11 @@ async function persist(conn: PoolConnection, userId: number, state: unknown, now
        last_saved_at = VALUES(last_saved_at)`,
     [userId, SAVE_VERSION, JSON.stringify(state), now]
   );
+  // Läuft in jeder Route, die den Stand tatsächlich neu berechnet/speichert (GET /state,
+  // POST /start, POST /action) — also bei jedem echten Spielkontakt, nicht nur beim Login
+  // (ein JWT bleibt 7 Tage gültig, "zuletzt eingeloggt" würde Dauerspieler falsch als
+  // inaktiv zeigen). users.last_active_at ist damit ein Aktivitäts-, kein Login-Zeitstempel.
+  await conn.execute('UPDATE users SET last_active_at = ? WHERE id = ?', [now, userId]);
 }
 
 // Gewonnene Markt-Gebote (server-seitig async in market_credits gesammelt, siehe
