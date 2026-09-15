@@ -1,23 +1,42 @@
-import { apiLogin, apiRegister, apiResendVerification } from '../api';
+import { apiLogin, apiRegister, apiResendVerification, apiRequestPasswordReset, apiResetPassword } from '../api';
 
 type OnSuccess = (token: string, username: string) => void;
+type Mode = 'login' | 'register' | 'check-email' | 'forgot' | 'forgot-sent' | 'reset';
+
+const SUBMIT_LABELS: Partial<Record<Mode, string>> = {
+  login: 'Anmelden',
+  register: 'Konto erstellen & spielen',
+  forgot: 'Link anfordern',
+  reset: 'Passwort speichern & spielen',
+};
+
+function escapeHtml(s: string): string {
+  return s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
+}
 
 export class LandingUI {
   private container: HTMLElement;
   private onSuccess: OnSuccess;
-  private mode: 'login' | 'register' | 'check-email' = 'login';
+  private mode: Mode = 'login';
   // Username/E-Mail, für die zuletzt eine Verifizierung nötig war — Ziel des
   // "Erneut senden"-Buttons (Login akzeptiert beides, siehe apiResendVerification).
   private pendingVerificationLogin = '';
+  // Username/E-Mail, für die zuletzt ein Reset-Link angefordert wurde (nur zur Anzeige).
+  private pendingResetLogin = '';
+  // Token aus dem Link der "Passwort vergessen"-Mail — gesetzt ⇒ Formular fürs neue Passwort.
+  private resetToken?: string;
   private initialError?: string;
 
-  constructor(container: HTMLElement, onSuccess: OnSuccess, initialError?: string) {
+  constructor(container: HTMLElement, onSuccess: OnSuccess, initialError?: string, resetToken?: string) {
     this.container = container;
     this.onSuccess = onSuccess;
     this.initialError = initialError;
+    this.resetToken = resetToken;
+    if (resetToken) this.mode = 'reset';
   }
 
   render(): void {
+    const showTabs = this.mode === 'login' || this.mode === 'register';
     this.container.innerHTML = `
       <div class="lp-root">
 
@@ -97,14 +116,12 @@ export class LandingUI {
               <p>Kostenlos — kein Download nötig.</p>
             </div>
             <div class="lp-auth-card">
-              ${this.mode === 'check-email' ? '' : `
+              ${showTabs ? `
               <div class="lp-auth-tabs">
                 <button class="lp-auth-tab ${this.mode === 'login' ? 'lp-auth-tab-active' : ''}" id="tab-login">Anmelden</button>
                 <button class="lp-auth-tab ${this.mode === 'register' ? 'lp-auth-tab-active' : ''}" id="tab-register">Registrieren</button>
-              </div>`}
-              ${this.mode === 'login' ? this.loginForm()
-                : this.mode === 'register' ? this.registerForm()
-                : this.checkEmailScreen()}
+              </div>` : ''}
+              ${this.cardContent()}
               <div id="auth-error" class="auth-error ${this.initialError ? '' : 'hidden'}">${this.initialError ?? ''}</div>
             </div>
           </div>
@@ -121,12 +138,24 @@ export class LandingUI {
     this.bindEvents();
   }
 
+  private cardContent(): string {
+    switch (this.mode) {
+      case 'login':       return this.loginForm();
+      case 'register':    return this.registerForm();
+      case 'check-email': return this.checkEmailScreen();
+      case 'forgot':      return this.forgotForm();
+      case 'forgot-sent': return this.forgotSentScreen();
+      case 'reset':       return this.resetForm();
+    }
+  }
+
   private loginForm(): string {
     return `
       <form id="auth-form" class="auth-form">
         <input class="auth-input" id="f-login" type="text" placeholder="Benutzername oder E-Mail" autocomplete="username" required>
         <input class="auth-input" id="f-password" type="password" placeholder="Passwort" autocomplete="current-password" required>
         <button class="auth-submit lp-submit" type="submit">Anmelden</button>
+        <a href="#" id="forgot-password-link" class="lp-back-link">Passwort vergessen?</a>
       </form>`;
   }
 
@@ -143,11 +172,48 @@ export class LandingUI {
   private checkEmailScreen(): string {
     return `
       <div class="auth-check-email">
-        <p>Wir haben dir einen Bestätigungslink an <strong>${this.pendingVerificationLogin}</strong> geschickt.
+        <p>Wir haben dir einen Bestätigungslink an <strong>${escapeHtml(this.pendingVerificationLogin)}</strong> geschickt.
         Klicke ihn an, um dein Konto zu aktivieren.</p>
         <button class="btn btn-secondary lp-submit" id="resend-verification-btn" type="button">Erneut senden</button>
         <a href="#" id="back-to-login-link" class="lp-back-link">Zurück zum Login</a>
       </div>`;
+  }
+
+  private forgotForm(): string {
+    return `
+      <form id="auth-form" class="auth-form">
+        <p class="auth-hint">Gib deinen Benutzernamen oder deine E-Mail-Adresse ein — wir schicken dir einen Link,
+        mit dem du ein neues Passwort vergeben kannst.</p>
+        <input class="auth-input" id="f-login" type="text" placeholder="Benutzername oder E-Mail" autocomplete="username" required>
+        <button class="auth-submit lp-submit" type="submit">Link anfordern</button>
+        <a href="#" id="back-to-login-link" class="lp-back-link">Zurück zum Login</a>
+      </form>`;
+  }
+
+  private forgotSentScreen(): string {
+    return `
+      <div class="auth-check-email">
+        <p>Falls es ein Konto zu <strong>${escapeHtml(this.pendingResetLogin)}</strong> gibt, haben wir dir eine Mail
+        mit einem Link zum Zurücksetzen geschickt. Der Link ist 1 Stunde gültig.</p>
+        <a href="#" id="back-to-login-link" class="lp-back-link">Zurück zum Login</a>
+      </div>`;
+  }
+
+  private resetForm(): string {
+    return `
+      <form id="auth-form" class="auth-form">
+        <p class="auth-hint">Vergib ein neues Passwort für dein Konto.</p>
+        <input class="auth-input" id="f-password" type="password" placeholder="Neues Passwort (min. 8 Zeichen)" autocomplete="new-password" minlength="8" required>
+        <input class="auth-input" id="f-password-confirm" type="password" placeholder="Neues Passwort wiederholen" autocomplete="new-password" minlength="8" required>
+        <button class="auth-submit lp-submit" type="submit">Passwort speichern &amp; spielen</button>
+        <a href="#" id="forgot-password-link" class="lp-back-link">Neuen Link anfordern</a>
+      </form>`;
+  }
+
+  private switchMode(mode: Mode): void {
+    this.initialError = undefined;
+    this.mode = mode;
+    this.render();
   }
 
   private bindEvents(): void {
@@ -161,7 +227,12 @@ export class LandingUI {
     });
     this.container.querySelector('#auth-form')?.addEventListener('submit', e => {
       e.preventDefault();
-      this.mode === 'login' ? this.handleLogin() : this.handleRegister();
+      switch (this.mode) {
+        case 'login':    this.handleLogin(); break;
+        case 'register': this.handleRegister(); break;
+        case 'forgot':   this.handleForgotPassword(); break;
+        case 'reset':    this.handleResetPassword(); break;
+      }
     });
     this.container.querySelector('#resend-verification-btn')?.addEventListener('click', async () => {
       const btn = this.container.querySelector<HTMLButtonElement>('#resend-verification-btn')!;
@@ -172,8 +243,15 @@ export class LandingUI {
     });
     this.container.querySelector('#back-to-login-link')?.addEventListener('click', e => {
       e.preventDefault();
-      this.initialError = undefined;
-      this.mode = 'login'; this.render();
+      this.switchMode('login');
+    });
+    this.container.querySelector('#forgot-password-link')?.addEventListener('click', e => {
+      e.preventDefault();
+      // Schon getippten Login übernehmen, damit man ihn nicht doppelt eingeben muss.
+      const typed = this.container.querySelector<HTMLInputElement>('#f-login')?.value.trim() ?? '';
+      this.switchMode('forgot');
+      if (typed) this.container.querySelector<HTMLInputElement>('#f-login')!.value = typed;
+      this.container.querySelector<HTMLInputElement>('#f-login')?.focus();
     });
     this.container.querySelectorAll('a[href="#auth"]').forEach(a => {
       a.addEventListener('click', e => {
@@ -195,7 +273,7 @@ export class LandingUI {
     const btn = this.container.querySelector<HTMLButtonElement>('.auth-submit');
     if (!btn) return;
     btn.disabled = loading;
-    btn.textContent = loading ? 'Bitte warten…' : (this.mode === 'login' ? 'Anmelden' : 'Konto erstellen & spielen');
+    btn.textContent = loading ? 'Bitte warten…' : (SUBMIT_LABELS[this.mode] ?? '');
   }
 
   private async handleLogin(): Promise<void> {
@@ -227,6 +305,35 @@ export class LandingUI {
       this.pendingVerificationLogin = confirmedEmail;
       this.mode = 'check-email';
       this.render();
+    } catch (err: any) {
+      this.showError(err.message);
+      this.setLoading(false);
+    }
+  }
+
+  private async handleForgotPassword(): Promise<void> {
+    const login = this.container.querySelector<HTMLInputElement>('#f-login')!.value.trim();
+    this.setLoading(true);
+    try {
+      await apiRequestPasswordReset(login);
+      this.pendingResetLogin = login;
+      this.switchMode('forgot-sent');
+    } catch (err: any) {
+      this.showError(err.message);
+      this.setLoading(false);
+    }
+  }
+
+  private async handleResetPassword(): Promise<void> {
+    const password = this.container.querySelector<HTMLInputElement>('#f-password')!.value;
+    const confirm  = this.container.querySelector<HTMLInputElement>('#f-password-confirm')!.value;
+    if (password.length < 8) return this.showError('Passwort muss mindestens 8 Zeichen haben');
+    if (password !== confirm) return this.showError('Die Passwörter stimmen nicht überein');
+
+    this.setLoading(true);
+    try {
+      const { token, username } = await apiResetPassword(this.resetToken!, password);
+      this.onSuccess(token, username);
     } catch (err: any) {
       this.showError(err.message);
       this.setLoading(false);

@@ -111,13 +111,22 @@ async function startGame(): Promise<void> {
 }
 
 // ── Auth-Flow ─────────────────────────────────────────────────────────────────
-function showAuth(initialError?: string): void {
+function showAuth(initialError?: string, resetToken?: string): void {
   const auth = new LandingUI(container, (token, username) => {
     localStorage.setItem('ft_token', token);
     localStorage.setItem('ft_username', username);
     startGame().catch(console.error);
-  }, initialError);
+  }, initialError, resetToken);
   auth.render();
+}
+
+// Klick auf den Link aus der "Passwort vergessen"-Mail (?resetToken=…) — Token aus der
+// URL entfernen (landet sonst in Verlauf/Referrer) und das Formular fürs neue Passwort zeigen.
+function takeResetTokenFromUrl(): string | null {
+  const params = new URLSearchParams(window.location.search);
+  const token = params.get('resetToken');
+  if (token) window.history.replaceState({}, '', window.location.pathname);
+  return token;
 }
 
 // Klick auf den per Mail verschickten Bestätigungslink (?verifyToken=…) — bestätigt die
@@ -142,6 +151,13 @@ let verifyErrorMessage: string | undefined;
 
 // ── Einstiegspunkt ────────────────────────────────────────────────────────────
 async function bootstrap(): Promise<void> {
+  // Reset-Link hat Vorrang, auch wenn noch eine alte Sitzung im localStorage liegt.
+  const resetToken = takeResetTokenFromUrl();
+  if (resetToken) {
+    showAuth(undefined, resetToken);
+    return;
+  }
+
   const verified = await tryVerifyFromUrl();
 
   if (verified || isLoggedIn()) {

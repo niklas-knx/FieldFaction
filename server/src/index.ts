@@ -55,7 +55,7 @@ async function main() {
   }
   try {
     await migrateUsersTable();
-    console.log('[DB] users-Tabelle auf E-Mail-Verifizierung migriert');
+    console.log('[DB] users-Tabelle migriert (E-Mail-Verifizierung, Passwort-Reset)');
   } catch (e: any) {
     console.warn('[DB] migrateUsersTable übersprungen:', e.sqlMessage ?? e.message);
   }

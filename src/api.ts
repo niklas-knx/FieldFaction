@@ -70,6 +70,27 @@ export async function apiResendVerification(login: string): Promise<void> {
   });
 }
 
+// Antwortet immer gleich, egal ob der Account existiert — der Aufrufer zeigt daher
+// nur einen neutralen "Falls es das Konto gibt…"-Hinweis an.
+export async function apiRequestPasswordReset(login: string): Promise<void> {
+  const res = await fetch(`${BASE}/auth/forgot-password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ login }),
+  });
+  await handleResponse(res);
+}
+
+// Token stammt aus dem Link in der Reset-Mail (?resetToken=…); bei Erfolg direkt eingeloggt.
+export async function apiResetPassword(token: string, password: string): Promise<{ token: string; username: string }> {
+  const res = await fetch(`${BASE}/auth/reset-password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token, password }),
+  });
+  return handleResponse(res);
+}
+
 // ── Game State ────────────────────────────────────────────────────────────────
 // Seit Issue #7 ist der Server die alleinige Quelle der Wahrheit für den Spielzustand:
 // der Client liest ihn nur noch (apiLoadState) und schickt Absichten (apiDispatchAction),

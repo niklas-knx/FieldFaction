@@ -81,6 +81,25 @@ export async function mockAuth(page: Page): Promise<void> {
   await page.route('**/api/auth/resend-verification', async route => {
     await route.fulfill({ json: { ok: true } });
   });
+
+  await page.route('**/api/auth/forgot-password', async route => {
+    await route.fulfill({ json: { ok: true } });
+  });
+
+  await page.route('**/api/auth/reset-password', async route => {
+    const { token } = route.request().postDataJSON() ?? {};
+    if (typeof token === 'string' && token.startsWith('reset-token-for-')) {
+      const username = token.slice('reset-token-for-'.length);
+      await route.fulfill({ json: { token: 'fake-jwt-token', username } });
+    } else {
+      await route.fulfill({ status: 400, json: { error: 'Ungültiger oder bereits benutzter Link' } });
+    }
+  });
+}
+
+// Simuliert den Klick auf den Link aus der "Passwort vergessen"-Mail.
+export function passwordResetLinkFor(username: string): string {
+  return `/?resetToken=reset-token-for-${username}`;
 }
 
 // Simuliert den Klick auf den per Mail verschickten Bestätigungslink.

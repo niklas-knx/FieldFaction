@@ -2,16 +2,19 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import express from 'express';
 import request from 'supertest';
 import bcrypt from 'bcrypt';
+import crypto from 'crypto';
 
 vi.mock('../db', () => ({ pool: { execute: vi.fn() } }));
-vi.mock('../mail', () => ({ sendVerificationEmail: vi.fn() }));
+vi.mock('../mail', () => ({ sendVerificationEmail: vi.fn(), sendPasswordResetEmail: vi.fn() }));
 
 import { pool } from '../db';
-import { sendVerificationEmail } from '../mail';
+import { sendVerificationEmail, sendPasswordResetEmail } from '../mail';
 import authRoutes from './auth';
 
 const execute = pool.execute as unknown as ReturnType<typeof vi.fn>;
 const sendMail = sendVerificationEmail as unknown as ReturnType<typeof vi.fn>;
+const sendResetMail = sendPasswordResetEmail as unknown as ReturnType<typeof vi.fn>;
+const sha256 = (s: string) => crypto.createHash('sha256').update(s).digest('hex');
 
 function buildApp() {
   const app = express();
@@ -27,6 +30,7 @@ function findCall(sqlPattern: RegExp): any[] | undefined {
 beforeEach(() => {
   execute.mockReset();
   sendMail.mockReset();
+  sendResetMail.mockReset();
   process.env.JWT_SECRET = 'test-secret-at-least-this-long-for-signing-1234567890';
 });
 
@@ -228,5 +232,123 @@ describe('POST /api/auth/resend-verification', () => {
 
     expect(res.status).toBe(200);
     expect(sendMail).not.toHaveBeenCalled();
+  });
+});
+
+// forgotPasswordLimiter erlaubt 3 Requests pro IP und Fenster — mehr Tests hier würden
+// am Rate-Limit statt an der Route scheitern.
+describe('POST /api/auth/forgot-password', () => {
+  it('stores only the hash of a fresh token and emails the plain token', async () => {
+    execute.mockImplementation(async (sql: string) => {
+      if (/SELECT id, username, email FROM users/.test(sql)) {
+        return [[{ id: 1, username: 'newbie', email: 'newbie@example.com' }]];
+      }
+      return [{ affectedRows: 1 }];
+    });
+
+    const res = await request(buildApp())
+      .post('/api/auth/forgot-password')
+      .send({ login: 'Newbie@Example.com' });
+
+    expect(res.status).toBe(200);
+    expect(sendResetMail).toHaveBeenCalledTimes(1);
+    const [to, username, token] = sendResetMail.mock.calls[0];
+    expect(to).toBe('newbie@example.com');
+    expect(username).toBe('newbie');
+    expect(token).toHaveLength(64);
+
+    const [, params] = findCall(/UPDATE users SET password_reset_token_hash/)!;
+    expect(params[0]).toBe(sha256(token));
+    expect(params[0]).not.toBe(token);
+    expect(params[1]).toBeGreaterThan(Date.now());
+  });
+
+  it('responds identically for a non-existent account (no user enumeration)', async () => {
+    execute.mockImplementation(async () => [[]]);
+
+    const res = await request(buildApp())
+      .post('/api/auth/forgot-password')
+      .send({ login: 'ghost' });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true });
+    expect(sendResetMail).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /api/auth/reset-password', () => {
+  it('sets the new password, consumes the token and returns a login JWT', async () => {
+    execute.mockImplementation(async (sql: string) => {
+      if (/SELECT id, username, password_reset_token_expires_at/.test(sql)) {
+        return [[{ id: 1, username: 'newbie', password_reset_token_expires_at: Date.now() + 60_000 }]];
+      }
+      return [{ affectedRows: 1 }];
+    });
+
+    const res = await request(buildApp())
+      .post('/api/auth/reset-password')
+      .send({ token: 'plain-token', password: 'brandnewpass1' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.username).toBe('newbie');
+    expect(typeof res.body.token).toBe('string');
+
+    const [, selectParams] = findCall(/SELECT id, username, password_reset_token_expires_at/)!;
+    expect(selectParams[0]).toBe(sha256('plain-token'));
+
+    const [updateSql, updateParams] = findCall(/UPDATE users SET password_hash/)!;
+    expect(updateSql).toMatch(/password_reset_token_hash = NULL/);
+    expect(await bcrypt.compare('brandnewpass1', updateParams[0])).toBe(true);
+  });
+
+  it('rejects an expired token without changing the password', async () => {
+    execute.mockImplementation(async (sql: string) => {
+      if (/SELECT id, username, password_reset_token_expires_at/.test(sql)) {
+        return [[{ id: 1, username: 'newbie', password_reset_token_expires_at: Date.now() - 1000 }]];
+      }
+      return [{ affectedRows: 1 }];
+    });
+
+    const res = await request(buildApp())
+      .post('/api/auth/reset-password')
+      .send({ token: 'old-token', password: 'brandnewpass1' });
+
+    expect(res.status).toBe(400);
+    expect(findCall(/UPDATE users SET password_hash/)).toBeFalsy();
+  });
+
+  it('rejects an unknown token', async () => {
+    execute.mockImplementation(async () => [[]]);
+
+    const res = await request(buildApp())
+      .post('/api/auth/reset-password')
+      .send({ token: 'does-not-exist', password: 'brandnewpass1' });
+
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects a token that was consumed by a concurrent request', async () => {
+    execute.mockImplementation(async (sql: string) => {
+      if (/SELECT id, username, password_reset_token_expires_at/.test(sql)) {
+        return [[{ id: 1, username: 'newbie', password_reset_token_expires_at: Date.now() + 60_000 }]];
+      }
+      return [{ affectedRows: 0 }];
+    });
+
+    const res = await request(buildApp())
+      .post('/api/auth/reset-password')
+      .send({ token: 'raced-token', password: 'brandnewpass1' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.token).toBeUndefined();
+  });
+
+  it('rejects a too-short password before touching the database', async () => {
+    const res = await request(buildApp())
+      .post('/api/auth/reset-password')
+      .send({ token: 'plain-token', password: 'short' });
+
+    expect(res.status).toBe(400);
+    expect(execute).not.toHaveBeenCalled();
   });
 });

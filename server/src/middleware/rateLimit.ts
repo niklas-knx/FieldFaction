@@ -53,3 +53,23 @@ export const resendVerificationLimiter = rateLimit({
   keyGenerator: ipKeyGenerator,
   message: { error: 'Zu viele Anfragen — bitte in ein paar Minuten erneut versuchen' },
 });
+
+// "Passwort vergessen": gleiche Begründung wie beim Resend — kein Mail-Spam gegen fremde Adressen.
+export const forgotPasswordLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 3,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: ipKeyGenerator,
+  message: { error: 'Zu viele Anfragen — bitte in ein paar Minuten erneut versuchen' },
+});
+
+// Passwort mit Token neu setzen: bremst Durchprobieren von Tokens aus.
+export const resetPasswordLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: ipKeyGenerator,
+  message: { error: 'Zu viele Versuche — bitte in ein paar Minuten erneut versuchen' },
+});

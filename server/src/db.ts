@@ -102,6 +102,8 @@ export async function migrateUsersTable(): Promise<void> {
     ['verification_token', 'VARCHAR(64) NULL'],
     ['verification_token_expires_at', 'BIGINT NULL'],
     ['last_active_at', 'BIGINT NULL'],
+    ['password_reset_token_hash', 'CHAR(64) NULL'],
+    ['password_reset_token_expires_at', 'BIGINT NULL'],
   ];
   for (const [name, def] of columns) {
     try {
