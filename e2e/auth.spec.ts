@@ -89,6 +89,8 @@ test.describe('Passwort vergessen', () => {
     await page.goto(passwordResetLinkFor('testuser'));
 
     await expect(page).not.toHaveURL(/resetToken/);
+    await expect(page.locator('#f-password')).toBeInViewport();
+    await expect(page.locator('#f-password')).toBeFocused();
     await page.fill('#f-password', 'brandnewpass1');
     await page.fill('#f-password-confirm', 'brandnewpass1');
     await page.click('.auth-submit');

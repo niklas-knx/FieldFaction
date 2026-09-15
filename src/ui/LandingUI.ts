@@ -136,6 +136,12 @@ export class LandingUI {
       </div>`;
 
     this.bindEvents();
+
+    // Vom Reset-Link kommend direkt zum Formular statt auf den Seitenanfang.
+    if (this.mode === 'reset') {
+      document.getElementById('auth')?.scrollIntoView();
+      this.container.querySelector<HTMLInputElement>('#f-password')?.focus({ preventScroll: true });
+    }
   }
 
   private cardContent(): string {
